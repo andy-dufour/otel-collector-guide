@@ -1,12 +1,22 @@
 title: OTel Collector Migration Guide
 description: A field guide for SREs and platform engineers migrating to the OpenTelemetry Collector
-remote_theme: pages-themes/minimal@v0.2.0
+remote_theme: just-the-docs/just-the-docs@v0.10.1
 plugins:
   - jekyll-remote-theme
+  - jekyll-seo-tag
 
-# Disable Liquid processing for markdown files (they contain Go/Prometheus {{ }} syntax)
+color_scheme: dark
+
+# Disable Liquid processing for markdown files (Go/Prometheus {{ }} syntax)
 defaults:
   - scope:
       path: ""
     values:
       render_with_liquid: false
+      layout: default
+
+# Navigation order
+just_the_docs:
+  collections: false
+
+nav_order_base: 0

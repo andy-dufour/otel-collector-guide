@@ -1,4 +1,6 @@
 ---
+title: "08 — Bare Metal and VMs"
+nav_order: 8
 render_with_liquid: false
 ---
 

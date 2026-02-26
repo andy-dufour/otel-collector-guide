@@ -1,4 +1,6 @@
 ---
+title: "Home"
+nav_order: 0
 render_with_liquid: false
 ---
 

@@ -1,4 +1,6 @@
 ---
+title: "03 — Agent + Gateway Topology"
+nav_order: 3
 render_with_liquid: false
 ---
 

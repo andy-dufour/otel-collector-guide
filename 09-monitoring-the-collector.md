@@ -1,4 +1,6 @@
 ---
+title: "09 — Monitoring the Collector"
+nav_order: 9
 render_with_liquid: false
 ---
 

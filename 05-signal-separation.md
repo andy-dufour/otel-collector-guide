@@ -1,4 +1,6 @@
 ---
+title: "05 — Signal Separation"
+nav_order: 5
 render_with_liquid: false
 ---
 

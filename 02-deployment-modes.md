@@ -1,4 +1,6 @@
 ---
+title: "02 — Deployment Modes"
+nav_order: 2
 render_with_liquid: false
 ---
 
