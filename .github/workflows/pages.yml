@@ -21,11 +21,10 @@ jobs:
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: '3.3'
-      - name: Install Jekyll 4
-        run: gem install jekyll jekyll-remote-theme jekyll-seo-tag
+          bundler-cache: true
       - uses: actions/configure-pages@v5
       - name: Build site
-        run: jekyll build -d ./_site
+        run: bundle exec jekyll build -d ./_site
         env:
           JEKYLL_ENV: production
       - uses: actions/upload-pages-artifact@v3
