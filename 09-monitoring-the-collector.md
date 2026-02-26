@@ -166,7 +166,7 @@ In a healthy pipeline, data is conserved: everything that enters eventually leav
 data_in_flight = accepted - (sent + dropped + filtered)
 ```
 
-If `data_in_flight` grows continuously, you have a leak — data is accumulating somewhere in the pipeline without being exported or explicitly dropped. Common causes: a processor that holds references indefinitely (tail_sampling with no decision timeout), or a queue that never drains because the exporter is silently misconfigured (wrong endpoint, expired API key returning non-retryable errors).
+If `data_in_flight` grows continuously, you have a leak — data is accumulating somewhere in the pipeline without being exported or explicitly dropped. Common causes: a processor that holds references indefinitely, or a queue that never drains because the exporter is silently misconfigured (wrong endpoint, expired API key returning non-retryable errors).
 
 **Quick health checks**:
 
@@ -849,7 +849,7 @@ flowchart TD
     Q6 -->|"Yes"| Q6A{"Is pod/node filter set?"}
     Q6A -->|"No"| FIX6["Add a node filter to<br/>k8sattributes. Without it,<br/>the processor caches ALL<br/>pods in the cluster.<br/>1000 pods ≈ 100MB cache."]
 
-    Q6A -->|"Yes"| Q7["Use pprof heap profile<br/>to find allocation hotspot.<br/>See section 6 for commands.<br/>Check for tail_sampling<br/>holding too many traces."]
+    Q6A -->|"Yes"| Q7["Use pprof heap profile<br/>to find allocation hotspot.<br/>See section 6 for commands.<br/>Check for processors holding<br/>data in memory."]
     Q6 -->|"No"| Q7
 
     style START fill:#f85149,stroke:#f85149,color:#fff

@@ -24,7 +24,7 @@ graph LR
         direction TB
         P1["memory_limiter<br/>(checks, no alloc)"]
         P2["batch processor<br/>holds items until<br/>batch is full or<br/>timeout fires"]
-        P3["Other processors<br/>(transform, filter,<br/>tail_sampling)"]
+        P3["Other processors<br/>(transform, filter,<br/>routing)"]
         P4["Memory allocated:<br/>batch_size × item_size<br/>× pipeline_count"]
     end
 
@@ -45,7 +45,7 @@ graph LR
 ```
 
 - **Receivers** allocate memory when deserializing incoming data. Each inbound request creates `pdata` structs on the heap. At high ingest rates, the receiver is a constant source of allocation pressure.
-- **Processors** hold data in-flight. The `batch` processor is the biggest memory consumer here — it accumulates items until a batch is full or a timeout fires. The `tail_sampling` processor is worse: it holds entire traces in memory for a decision window (30-60 seconds). The `memory_limiter` itself uses negligible memory; it just checks the runtime stats and refuses data when the threshold is crossed.
+- **Processors** hold data in-flight. The `batch` processor is the biggest memory consumer here — it accumulates items until a batch is full or a timeout fires. The `memory_limiter` itself uses negligible memory; it just checks the runtime stats and refuses data when the threshold is crossed.
 - **Exporters** queue completed batches for sending. The `sending_queue` is the single largest potential memory consumer in the entire pipeline. A full queue at default settings can consume tens of gigabytes.
 
 ### The three memory controls
@@ -160,7 +160,7 @@ flowchart TD
 
     Q5 -->|"No (unlimited)"| FIX5["Set send_batch_max_size<br/>to 2× send_batch_size.<br/>Without a cap, a burst<br/>can create unbounded batches."]
 
-    Q5 -->|"Yes"| Q6["Check for tail_sampling<br/>processor holding too many<br/>traces. Check pprof heap<br/>profile for allocation hotspots."]
+    Q5 -->|"Yes"| Q6["Check pprof heap profile<br/>for allocation hotspots.<br/>Look for processors holding<br/>data in memory."]
 
     style START fill:#f85149,stroke:#f85149,color:#fff
     style FIX1 fill:#3fb950,stroke:#3fb950,color:#000
@@ -285,7 +285,7 @@ This is the memory the batch processor can consume when all consumers are busy a
 |-----------|---------|-----|
 | Batch too large + high throughput | Memory pressure. Each batch holds data in memory until sent. 10 in-flight batches of 8192 items at 4KB each = 320MB. | Reduce `send_batch_size` or `send_batch_max_size`. |
 | Batch too small + high throughput | CPU pressure from serialization overhead. Too many HTTP/gRPC calls. Backend rate limiting (429s). | Increase `send_batch_size`. Fewer, larger requests are more efficient. |
-| Timeout too long | Data latency increases. Spans sit in the batch waiting for more items. Tail sampling windows may expire before data arrives at the gateway. | Reduce `timeout`. For traces, 1-2s max. For metrics, 5-10s is fine. |
+| Timeout too long | Data latency increases. Spans sit in the batch waiting for more items. | Reduce `timeout`. For traces, 1-2s max. For metrics, 5-10s is fine. |
 | `send_batch_max_size: 0` (default) | A burst creates a single enormous batch. A Prometheus scrape returning 100K metrics at once creates a 100K-item batch, consuming 300MB+ in a single allocation. | Always set `send_batch_max_size` to a bounded value. 2x `send_batch_size` is a safe default. |
 
 ---
@@ -604,7 +604,7 @@ Memory is the usual bottleneck, but CPU matters too. The collector spends CPU cy
 | Compression (zstd) | High | Compressing outbound data to the backend. zstd is CPU-intensive but achieves 3-5x compression. |
 | Compression (gzip) | Medium | Less CPU than zstd, but worse compression ratio. |
 | Transform processor | Medium | OTTL statement evaluation per item. Complex regex in OTTL is expensive. |
-| Tail sampling processor | Medium | Decision evaluation per trace. Mostly memory-bound but CPU for policy evaluation. |
+| Routing/connector logic | Low-Medium | Routing decisions and connector evaluation. |
 | Filter processor | Low | Simple attribute checks. Negligible CPU. |
 | Batch processor | Low | Accumulation is cheap. The cost is in the serialization that happens on export. |
 | TLS handshakes | Low (amortized) | Expensive per handshake, but gRPC reuses connections. Only matters during connection storms. |

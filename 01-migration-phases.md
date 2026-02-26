@@ -435,7 +435,7 @@ host metrics. The gateway pool handles routing, transforms, and backend fanout.
 This is the production-grade topology. It separates concerns:
 
 - **Agents** handle what is node-local: host metrics, pod metadata, local buffering.
-- **Gateways** handle what is cluster-global: routing, tail sampling, cross-service aggregation.
+- **Gateways** handle what is cluster-global: routing, transforms, cross-service aggregation.
 
 ### Architecture
 
@@ -456,7 +456,7 @@ graph TB
             AG2 -.->|"scrape<br/>kubelet"| KL2["kubelet<br/>metrics"]
         end
 
-        AG1 -->|"OTLP/gRPC<br/>compressed"| GW["otelcol-contrib Gateway Pool<br/>(Deployment, 3 replicas, HPA)<br/>────────────────────<br/>transform, tail_sampling,<br/>routing, loadbalancing"]
+        AG1 -->|"OTLP/gRPC<br/>compressed"| GW["otelcol-contrib Gateway Pool<br/>(Deployment, 3 replicas, HPA)<br/>────────────────────<br/>transform, filtering,<br/>routing, batching"]
         AG2 -->|"OTLP/gRPC<br/>compressed"| GW
 
         GW -->|"OTLP/gRPC"| HC[(Honeycomb)]
@@ -678,7 +678,7 @@ service:
 | Kubernetes metadata enrichment | Yes — k8sattributes | No (already enriched) |
 | Local buffering/retry | Yes — small queue (1000) | Yes — large queue (5000) |
 | Filtering (drop noisy spans) | No — let gateway decide globally | Yes — filter processor |
-| Tail-based sampling | No — requires cross-node context | Yes — if configured |
+| Centralized processing | No — limited to local data | Yes — cluster-wide transforms and routing |
 | Backend routing/fanout | No — single export to gateway | Yes — multi-exporter |
 | Heavy transforms | No — keep agent CPU light | Yes — transform processor |
 
@@ -964,7 +964,7 @@ flowchart TD
 
     Q3 -->|"No — gateway only"| P3["Start at Phase 3<br/>────────────────<br/>Deploy DaemonSet agents.<br/>Move k8s enrichment to agents."]
 
-    Q3 -->|"Yes — agent +<br/>gateway already"| DONE["You are at Phase 3<br/>────────────────<br/>Focus on optimization:<br/>- Tail sampling (ch. 05)<br/>- Sizing (ch. 06)<br/>- HA (ch. 07)"]
+    Q3 -->|"Yes — agent +<br/>gateway already"| DONE["You are at Phase 3<br/>────────────────<br/>Focus on optimization:<br/>- Signal separation (ch. 05)<br/>- Sizing (ch. 06)<br/>- HA (ch. 07)"]
 
     Q1 -->|"Mixed — some OTel,<br/>some vendor"| MIXED["Start at Phase 1<br/>for vendor-SDK services.<br/>Start at Phase 2<br/>for OTel-SDK services.<br/>Run in parallel."]
 

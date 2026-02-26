@@ -54,7 +54,7 @@ Three modes, one sentence each:
 |------|-----------|----------------------|
 | **DaemonSet** | One collector per node | Default choice. Host metrics, k8s metadata, local buffering. |
 | **Sidecar** | One collector per pod | Per-app isolation in multi-tenant clusters. |
-| **Gateway** | Standalone pool behind a Service | Centralized processing: tail sampling, routing, fanout. |
+| **Gateway** | Standalone pool behind a Service | Centralized processing: routing, transforms, fanout. |
 
 ---
 
@@ -467,7 +467,7 @@ exporters:
       queue_size: 1000
 
   # Option B: send directly to Honeycomb (skip gateway)
-  # Use this if the sidecar does not need tail sampling or routing.
+  # Use this if the sidecar does not need centralized routing or transforms.
   # otlp/honeycomb:
   #   endpoint: api.honeycomb.io:443
   #   headers:
@@ -582,11 +582,10 @@ The operational cost of sidecar config changes is the single biggest reason most
 
 ## Gateway (Deployment / StatefulSet)
 
-A standalone pool of collector instances behind a Kubernetes Service, typically deployed as a Deployment with an HPA. The gateway receives telemetry from DaemonSet agents, sidecars, or directly from applications. It performs centralized processing — tail sampling, routing, transforms, fanout to multiple backends — and exports to the final destination.
+A standalone pool of collector instances behind a Kubernetes Service, typically deployed as a Deployment with an HPA. The gateway receives telemetry from DaemonSet agents, sidecars, or directly from applications. It performs centralized processing — routing, transforms, fanout to multiple backends — and exports to the final destination.
 
 ### When to use
 
-- You need **tail sampling** (decisions that require seeing all spans in a trace, which means all spans must hit the same collector instance).
 - You need **centralized routing** (send traces to Honeycomb, metrics to Prometheus, logs to Loki).
 - You need **multi-backend fanout** (dual-ship to the legacy vendor and Honeycomb during migration).
 - You want a single egress point for observability traffic (firewall rules, network policy, cost attribution).
@@ -603,7 +602,7 @@ Size the gateway pool based on **total cluster throughput**, not per-node.
 | Large | 200K - 1M | 5-10 | 2000m | 4Gi | 8Gi | Consider signal separation (ch 05) |
 | Very large | > 1M | 10+ | 4000m | 8Gi | 16Gi | Tiered gateways (ch 04) |
 
-Tail sampling is memory-hungry. If you enable `tailsamplingprocessor`, double the memory numbers above. It must hold complete traces in memory for the decision window (typically 30-60 seconds). Chapter 06 covers the memory math for tail sampling specifically.
+If you add heavy processors (complex transforms, multiple routing pipelines), increase the memory numbers above. Chapter 06 covers the memory math in detail.
 
 ### Kubernetes manifest
 
@@ -858,7 +857,7 @@ service:
 
 | | |
 |---|---|
-| **Pros** | Centralized config — one place to change processing rules for all telemetry. Scales horizontally with the HPA. Can perform cross-trace operations like tail sampling (requires `loadbalancingexporter` on the agent tier to route traces by trace ID — see ch 03). Single egress point simplifies network policy and firewall rules. Can fan out to multiple backends (dual-ship) without agents needing to know about each backend. |
+| **Pros** | Centralized config — one place to change processing rules for all telemetry. Scales horizontally with the HPA. Single egress point simplifies network policy and firewall rules. Can fan out to multiple backends (dual-ship) without agents needing to know about each backend. |
 | **Cons** | Additional network hop between agent and backend adds latency (~1-5ms in-cluster, negligible for observability). Single point of failure if the gateway pool is undersized or misconfigured — all agents queue up, then drop. Requires careful capacity planning: if the gateway pool cannot keep up with aggregate throughput, backpressure propagates to every agent and ultimately every SDK in the cluster. |
 
 ### What breaks
@@ -884,7 +883,7 @@ Fix:
 - Scale up replicas (HPA should handle this if metrics are configured correctly).
 - Increase `sending_queue.num_consumers` to push data out faster.
 - Reduce batch `timeout` to flush smaller batches more frequently.
-- If the bottleneck is a processor (tail sampling is expensive), profile with `pprof` and either reduce the decision window or move to tiered gateways (ch 04).
+- If the bottleneck is a processor, profile with `pprof` and optimize or move to tiered gateways (ch 04).
 
 ---
 
@@ -898,7 +897,7 @@ Fix:
 | **Config management** | One ConfigMap for all workloads | Per-app (risk of drift) | One ConfigMap for all telemetry |
 | **Host metrics** | Yes (hostfs mount) | No | No (receives from agents) |
 | **K8s metadata enrichment** | Yes (k8sattributes processor) | Not needed (app sets own metadata) | Possible but less efficient |
-| **Tail sampling** | No (sees only local spans) | No (sees only one app's spans) | Yes (when combined with load-balancing exporter) |
+| **Centralized processing** | Limited (sees only local spans) | Limited (sees only one app's spans) | Yes (centralized transforms, routing, fanout) |
 | **Operational complexity** | Low | High (sidecar injection, per-app config, mass restarts) | Medium (capacity planning, HA, load balancing) |
 | **Upgrade path** | Roll the DaemonSet (one pod per node restarts) | Restart every app pod | Roll the Deployment (N replicas restart) |
 | **Failure detection** | Per-node gap in data | Per-app gap in data | Cluster-wide gap in data |
@@ -918,12 +917,12 @@ flowchart TD
     Q1 -->|No| Q2{"Need per-app<br/>isolation or per-team<br/>collector config?"}
 
     Q2 -->|Yes| SC["Deploy as<br/>Sidecar"]
-    Q2 -->|No| Q3{"Need tail sampling,<br/>routing, or<br/>multi-backend fanout?"}
+    Q2 -->|No| Q3{"Need centralized<br/>routing, transforms, or<br/>multi-backend fanout?"}
 
     Q3 -->|Yes| GW["Deploy as<br/>Gateway pool"]
     Q3 -->|No| DS
 
-    DS --> Q4{"Also need centralized<br/>processing or<br/>tail sampling?"}
+    DS --> Q4{"Also need centralized<br/>processing or<br/>multi-backend fanout?"}
     Q4 -->|Yes| BOTH["Add a Gateway pool<br/>behind the agents"]
     Q4 -->|No| DONE_DS["DaemonSet only<br/>(send direct to backend)"]
 
@@ -1040,7 +1039,7 @@ The operational cost is high: every app pod has a sidecar, and config changes re
 All app pods → DaemonSet agent (per node) → Honeycomb (direct)
 ```
 
-The simplest possible topology. No gateway. The DaemonSet agent exports directly to Honeycomb. Use this when you do not need tail sampling, routing, or multi-backend fanout, and you want to minimize infrastructure. The tradeoff: every DaemonSet pod needs the Honeycomb API key, and config changes to the exporter require rolling all agents.
+The simplest possible topology. No gateway. The DaemonSet agent exports directly to Honeycomb. Use this when you do not need centralized routing or multi-backend fanout, and you want to minimize infrastructure. The tradeoff: every DaemonSet pod needs the Honeycomb API key, and config changes to the exporter require rolling all agents.
 
 This is a reasonable starting point for Phase 1 of a migration (ch 01). Add the gateway tier later when you need centralized processing.
 

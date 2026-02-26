@@ -445,7 +445,7 @@ certainly in the exporter queue — check `otelcol_exporter_send_failed_spans` f
 | NRQL query language | Honeycomb's query builder is visual, not text-based. Different model: Honeycomb excels at high-cardinality exploration; NRQL excels at ad-hoc SQL-like queries. | Medium — learning curve, different strengths. |
 | Logs in Context (auto-correlation) | OTel SDK auto-injects trace context into logs. Honeycomb correlates traces and logs via trace ID. Requires OTel SDK instrumentation. | Low — OTel handles this natively. |
 | Change Tracking (deployments) | Use Honeycomb markers for deployment events. Requires CI/CD integration. | Low — straightforward replacement. |
-| Infinite Tracing | Honeycomb ingests all spans by default (no sampling required at NR's end). Use tail sampling in the collector if volume control is needed. | None — Honeycomb's model is full-fidelity by design. |
+| Infinite Tracing | Honeycomb ingests all spans by default (no sampling required at NR's end). Use head sampling at the SDK level or `probabilistic_sampler` at the gateway if volume control is needed. | None — Honeycomb's model is full-fidelity by design. |
 
 ### 3.6 Before/After Architecture
 
@@ -1201,9 +1201,7 @@ handles all signals (traces, metrics, logs) instead of just traces. When you dep
 DaemonSet, you can remove the Jaeger Agent DaemonSet.
 
 **Sampling migration**: If you use Jaeger's remote sampling (the Jaeger Collector serves sampling
-strategies to clients), you need to replace this with either:
-- OTel SDK-level sampling (head sampling via `TraceIdRatioBased` sampler)
-- Collector-level tail sampling (via the `tailsampling` processor — see [Chapter 06](06-tuning-production.md))
+strategies to clients), replace it with OTel SDK-level head sampling using the `TraceIdRatioBased` sampler (e.g., `OTEL_TRACES_SAMPLER=parentbased_traceidratio` with `OTEL_TRACES_SAMPLER_ARG=0.1`). For gateway-level sampling, use the `probabilistic_sampler` processor.
 
 ### 6.6 What You Lose
 
@@ -1211,7 +1209,7 @@ strategies to clients), you need to replace this with either:
 |---------------|--------------------------|-------------|
 | Jaeger UI (trace visualization) | Honeycomb trace waterfall view. More powerful (supports high-cardinality queries), different interface. | None — Honeycomb's trace view is a superset. |
 | Jaeger dependency graph | Honeycomb service map (derived from trace data). | None — equivalent feature. |
-| Jaeger remote sampling | OTel SDK head sampling or collector tail sampling processor. More flexible but requires different configuration. | Low — OTel sampling is more capable. |
+| Jaeger remote sampling | OTel SDK head sampling (`parentbased_traceidratio` sampler). More flexible and simpler to operate. | Low — OTel sampling is more capable. |
 | Direct Elasticsearch/Cassandra access | Honeycomb is SaaS — no direct storage access. Data queried via Honeycomb API. | Low — different access model. |
 | Jaeger Spark dependencies job | Honeycomb computes service dependencies automatically from trace data. No batch job needed. | None — automatic in Honeycomb. |
 

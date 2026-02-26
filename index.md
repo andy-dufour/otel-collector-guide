@@ -57,7 +57,7 @@ Complete, annotated YAML configs live in [`configs/`](configs/). Inline snippets
 | File | Description |
 |------|-------------|
 | [`configs/agent-daemonset.yaml`](configs/agent-daemonset.yaml) | Per-node agent config: OTLP receiver, memory limiter, batch processor, OTLP/gRPC exporter to the gateway pool. |
-| [`configs/gateway.yaml`](configs/gateway.yaml) | Gateway pool config: OTLP/gRPC receiver, tail sampling, attribute processing, OTLP/gRPC exporter to Honeycomb. |
+| [`configs/gateway.yaml`](configs/gateway.yaml) | Gateway pool config: OTLP/gRPC receiver, attribute processing, OTLP/gRPC exporter to Honeycomb. |
 | [`configs/gateway-metrics-only.yaml`](configs/gateway-metrics-only.yaml) | Signal-separated gateway dedicated to metrics: Prometheus receiver, delta conversion, Honeycomb metrics exporter. |
 | [`configs/bare-metal-systemd.yaml`](configs/bare-metal-systemd.yaml) | Standalone Collector config for systemd-managed hosts, including filelog receiver for syslog and journald. |
 | [`configs/dual-ship.yaml`](configs/dual-ship.yaml) | Dual-ship config with fan-out exporters: sends to both the legacy vendor and Honeycomb during migration Phase 1. |
@@ -69,5 +69,5 @@ Complete, annotated YAML configs live in [`configs/`](configs/). Inline snippets
 
 - **Inline YAML snippets are excerpts.** They show the relevant section of a config, not the whole file. The full, copy-pasteable config is always in `configs/`.
 - **Mermaid diagrams** are used for architecture visuals. They render natively in GitHub, Obsidian, and VS Code (with the Markdown Preview Mermaid extension).
-- **All configs target `otelcol-contrib`**, not the core distribution. The core distribution lacks processors and receivers used throughout this guide (e.g., `tailsamplingprocessor`, `filelogreceiver`, `k8sattributesprocessor`). If you need a minimal binary, build a custom distribution with `ocb` (OpenTelemetry Collector Builder) and include only the components you use.
+- **All configs target `otelcol-contrib`**, not the core distribution. The core distribution lacks processors and receivers used throughout this guide (e.g., `filelogreceiver`, `k8sattributesprocessor`, `transformprocessor`). If you need a minimal binary, build a custom distribution with `ocb` (OpenTelemetry Collector Builder) and include only the components you use.
 - **Honeycomb is the target backend, but the architectures are OTLP-standard.** Swap the exporter block and these topologies work with any OTLP-compatible backend.

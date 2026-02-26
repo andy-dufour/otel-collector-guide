@@ -26,7 +26,7 @@
 #   - Environment variable: HONEYCOMB_API_KEY
 #
 # Why separate traces?
-#   1. Tail sampling (if added later) requires dedicated memory and CPU.
+#   1. Traces have different processing requirements than metrics/logs.
 #   2. Trace volume spikes during incidents when you need observability most.
 #   3. Independent HPA scaling based on trace-specific queue depth metrics.
 #   4. Processor tuning (batch sizes, timeouts) optimized for trace patterns.

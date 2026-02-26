@@ -12,7 +12,7 @@
 #     Agents -> metrics-logs-gateway (this) -> backend
 #
 #   Metrics and logs are combined in one gateway because:
-#   1. Neither requires tail sampling (which demands dedicated resources).
+#   1. Their processing needs are simpler than traces (no sampling buffers).
 #   2. Their traffic patterns are complementary -- metrics are steady,
 #      logs spike during incidents -- so they share capacity well.
 #   3. Fewer deployments to manage than full 3-way signal separation.

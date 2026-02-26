@@ -1157,7 +1157,7 @@ If different nodes have wildly different throughput profiles (e.g., GPU nodes wi
 
 ### Capacity planning table
 
-Use this table to estimate gateway replica count. These numbers assume gateway pods with 2Gi memory limit, 1 CPU request, and the processor chain from section 3 (memory_limiter + transform + filter + batch). Adjust downward if your processors are heavier (e.g., tail sampling doubles memory cost).
+Use this table to estimate gateway replica count. These numbers assume gateway pods with 2Gi memory limit, 1 CPU request, and the processor chain from section 3 (memory_limiter + transform + filter + batch). Adjust if your processors are heavier (e.g., complex transforms or multiple routing pipelines).
 
 | Cluster throughput | Spans/sec | Metric series | Log lines/sec | Gateway replicas | Total gateway memory |
 |---|---|---|---|---|---|

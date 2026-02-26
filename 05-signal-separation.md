@@ -19,9 +19,9 @@ The failure mode the author has seen most often: a Prometheus federation scrape 
 | Traffic pattern | Bursty (follows request load) | Steady (scrape interval) | Extremely high volume, bursty |
 | Payload size | Large (deep spans with many attributes) | Small (datapoint + labels) | Variable (raw text can be huge) |
 | Relative volume | 1x baseline | 0.5-2x baseline | 10-100x baseline |
-| Latency sensitivity | High (tail sampling needs all spans within window) | Low (a missed scrape is retried in 15-60s) | Low (seconds of delay acceptable) |
+| Latency sensitivity | High (traces should flush quickly for timely debugging) | Low (a missed scrape is retried in 15-60s) | Low (seconds of delay acceptable) |
 | Loss tolerance | Low for errors/SLO-tracked; moderate for bulk | Recoverable (next scrape fills the gap) | Moderate (structured events matter more than raw lines) |
-| Processing cost | Memory-heavy (tail sampling holds full traces) | CPU-light | CPU-heavy (regex parsing, structuring) |
+| Processing cost | Moderate (transforms, filtering) | CPU-light | CPU-heavy (regex parsing, structuring) |
 
 ### Before vs. after
 
@@ -81,7 +81,7 @@ processors:
   batch/traces:
     send_batch_size: 2048
     send_batch_max_size: 4096
-    timeout: 2s            # Traces: flush fast for tail sampling
+    timeout: 2s            # Traces: flush fast for timely debugging
 
   batch/metrics:
     send_batch_size: 4096
@@ -277,7 +277,7 @@ service:
 
 ### Traces gateway config
 
-Optimized for bursty, latency-sensitive trace data. Smaller queues because traces should flush fast, especially if you are doing tail sampling.
+Optimized for bursty, latency-sensitive trace data. Traces should flush fast for timely debugging.
 
 ```yaml
 # Traces gateway — optimized for bursty, latency-sensitive data
@@ -631,11 +631,11 @@ service:
       exporters: [otlp/honeycomb]
 ```
 
-### Solution 3: Tail sampling at the gateway
+### Solution 3: SDK-level head sampling for noisy services
 
-Keep all errors and slow requests from noisy services, but sample normal requests heavily. This gives you the best of both worlds: you see every failure, but you are not paying for 400K healthy polls per second.
+Configure noisy services to use head sampling at the SDK level. Set `OTEL_TRACES_SAMPLER=parentbased_traceidratio` with a low `OTEL_TRACES_SAMPLER_ARG` (e.g., `0.01` for 1%) on the noisy service. This reduces volume at the source — the cheapest possible place to sample. Combine with a custom sampler that always records error spans to preserve debuggability.
 
-This requires the `tail_sampling` processor on the gateway tier and trace-aware routing via the `loadbalancingexporter` on the agent tier (see chapter 03).
+> **Note**: The `tail_sampling` processor exists and can make keep/drop decisions based on error status and latency, but it is not recommended for production due to stability and scaling concerns. Head sampling at the SDK level or `probabilistic_sampler` at the gateway are more reliable alternatives.
 
 ### Volume math
 
@@ -906,7 +906,7 @@ When running dedicated pools, size each one according to the signal's characteri
 | Signal | Throughput | Replicas | CPU (each) | Memory (each) | Notes |
 |--------|-----------|----------|------------|---------------|-------|
 | **Traces** | 50K spans/sec | 3 | 1 CPU | 2Gi | Baseline for most clusters |
-| **Traces** | 200K spans/sec | 5 | 2 CPU | 4Gi | Double memory if tail sampling is enabled |
+| **Traces** | 200K spans/sec | 5 | 2 CPU | 4Gi | Increase if running heavy transforms |
 | **Traces** | 500K spans/sec | 10 | 2 CPU | 8Gi | Consider tiered gateways (ch 04) |
 | **Metrics** | 100K datapoints/sec | 2 | 500m | 1Gi | Metrics are lightweight |
 | **Metrics** | 500K datapoints/sec | 3 | 1 CPU | 2Gi | Watch for cardinality explosion |
@@ -916,7 +916,7 @@ When running dedicated pools, size each one according to the signal's characteri
 
 Key sizing notes:
 
-- **Traces are memory-heavy** when doing tail sampling. The `tail_sampling` processor must hold complete traces in memory for the decision window (30-60s). At 200K spans/sec with a 30s window, that is 6M spans in memory. Each span averages 1-2KB. Budget 6-12Gi just for the sampling buffer, on top of the baseline.
+- **Traces are the most resource-intensive signal** to process due to their bursty nature, large payloads, and the transforms typically applied (attribute normalization, filtering).
 - **Logs are CPU-heavy** when parsing. If your logs gateway runs `filelog` receiver with regex-based parsing, or the `transform` processor with complex OTTL statements, CPU becomes the bottleneck before memory. Profile with `pprof` to confirm.
 - **Metrics are the cheapest signal** to process. They are small, steady, and require minimal processing. If your metrics pool is using significant resources, check for cardinality problems (high-cardinality labels like `pod_uid` or `request_id` on metrics).
 

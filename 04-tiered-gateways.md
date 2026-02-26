@@ -1,6 +1,6 @@
 # Chapter 04 — Tiered Gateways
 
-Multi-tier gateway architectures for organizations that have outgrown a single gateway pool. This chapter covers two-tier and three-tier topologies, the `loadbalancing` exporter for trace-aware routing, multi-cluster routing, cross-cluster authentication, failure cascades, and sizing guidance.
+Multi-tier gateway architectures for organizations that have outgrown a single gateway pool. This chapter covers two-tier and three-tier topologies, multi-cluster routing, cross-cluster authentication, failure cascades, and sizing guidance.
 
 If you are running a single Kubernetes cluster with under 500K spans/sec, you probably do not need any of this. The single-tier agent + gateway topology from chapter 03 will serve you well. Come back when it stops being enough.
 
@@ -12,11 +12,10 @@ A single gateway pool works until it does not. These are the concrete signs that
 
 | Signal | Why it forces a tier | Threshold |
 |--------|---------------------|-----------|
-| Aggregate throughput exceeds gateway pool capacity | A single pool at 10 replicas with 4Gi each handles ~500K spans/sec. Beyond that, you hit memory limits on tail sampling or CPU limits on transform processing. | > 500K spans/sec aggregate |
-| Multiple K8s clusters need unified processing | Each cluster's agents need a local gateway to avoid cross-cluster network hops. But tail sampling and routing decisions need a global view. | 2+ clusters |
+| Aggregate throughput exceeds gateway pool capacity | A single pool at 10 replicas with 2Gi each handles ~500K spans/sec. Beyond that, you hit CPU limits on transform processing. | > 500K spans/sec aggregate |
+| Multiple K8s clusters need unified processing | Each cluster's agents need a local gateway to avoid cross-cluster network hops. Routing decisions and centralized processing need a global view. | 2+ clusters |
 | Regional compliance requirements | EU data must be processed in EU before any aggregation or export. A single global gateway pool violates data residency requirements. | GDPR, data sovereignty mandates |
 | Different backend routing per cluster or environment | Production cluster routes to Honeycomb with full retention. Staging cluster routes to Honeycomb with 10% sampling. A single pool cannot serve both without complex routing logic in every pipeline. | Different sampling/routing per cluster |
-| Tail sampling requires trace-aware routing | All spans for a single trace must arrive at the same gateway instance. In a multi-cluster setup, traces that cross cluster boundaries need a load-balanced tier that routes by trace ID. | Cross-cluster traces with tail sampling |
 
 ### Single-tier bottleneck
 
@@ -70,7 +69,7 @@ The two-tier model adds a cluster-local gateway pool (Tier 1) in front of a regi
 | Tier | Location | Responsibilities | Deployed as |
 |------|----------|-----------------|-------------|
 | **Tier 1** | Per cluster | K8s metadata enrichment overflow from agents, initial filtering (drop healthchecks, truncate attributes), batching, compression before cross-cluster export | Deployment in each cluster's `otel` namespace |
-| **Tier 2** | Dedicated infra cluster or regional cluster | Cross-cluster aggregation, tail sampling, transform processing, routing to backends | Deployment in a central infrastructure cluster |
+| **Tier 2** | Dedicated infra cluster or regional cluster | Cross-cluster aggregation, transform processing, routing to backends | Deployment in a central infrastructure cluster |
 
 ### Architecture
 
@@ -112,7 +111,7 @@ graph TB
 
 ### Tier 1 gateway config (cluster-local)
 
-This config handles filtering, batching, and forwarding. It does not do tail sampling — that requires a global view and happens at Tier 2.
+This config handles filtering, batching, and forwarding. Heavy processing (transforms, routing) happens at Tier 2.
 
 ```yaml
 # Tier 1 gateway — deployed per cluster
@@ -226,11 +225,11 @@ service:
 
 ### Tier 2 gateway config (regional/central)
 
-This config receives data from all Tier 1 gateways and performs the heavy processing: tail sampling, transforms, and backend export. It is the only tier that holds Honeycomb API keys.
+This config receives data from all Tier 1 gateways and performs the heavy processing: transforms, filtering, and backend export. It is the only tier that holds Honeycomb API keys.
 
 ```yaml
 # Tier 2 gateway — deployed in the infrastructure cluster
-# Handles: tail sampling, transforms, backend export
+# Handles: transforms, filtering, backend export
 receivers:
   otlp:
     protocols:
@@ -243,8 +242,8 @@ receivers:
 processors:
   memory_limiter:
     check_interval: 1s
-    limit_mib: 3200       # 80% of 4Gi container limit
-    spike_limit_mib: 800
+    limit_mib: 1638       # 80% of 2Gi container limit
+    spike_limit_mib: 400
 
   # Normalize semantic conventions across clusters
   # (different clusters may run different SDK versions)
@@ -260,32 +259,6 @@ processors:
             where attributes["http.url"] != nil
           - delete_key(attributes, "http.url")
             where attributes["url.full"] != nil
-
-  # Tail sampling — requires all spans for a trace on this instance
-  # See section 3 for the loadbalancing exporter that makes this work
-  tail_sampling:
-    decision_wait: 30s            # Wait up to 30s for all spans in a trace
-    num_traces: 200000            # Max traces held in memory simultaneously
-    expected_new_traces_per_sec: 50000
-    policies:
-      # Policy 1: Always keep error traces — these are the ones you debug
-      - name: errors-always
-        type: status_code
-        status_code:
-          status_codes:
-            - ERROR
-
-      # Policy 2: Always keep slow traces (> 2s)
-      - name: slow-traces
-        type: latency
-        latency:
-          threshold_ms: 2000
-
-      # Policy 3: Probabilistic 10% for everything else
-      - name: baseline-sample
-        type: probabilistic
-        probabilistic:
-          sampling_percentage: 10
 
   batch:
     send_batch_size: 4096
@@ -321,7 +294,6 @@ service:
       processors:
         - memory_limiter
         - transform/normalize
-        - tail_sampling
         - batch
       exporters: [otlp/honeycomb]
     metrics:
@@ -342,15 +314,15 @@ service:
       level: detailed
 ```
 
-**Note on tail sampling memory**: with `num_traces: 200000` and `decision_wait: 30s`, the tail sampling processor holds up to 200K incomplete traces in memory. Each trace consumes roughly 5-20 KB depending on span count and attribute size. At the high end, that is 4 GB just for the trace buffer. This is why Tier 2 gateways need 4Gi memory limits. If you are not doing tail sampling, you can halve the memory — see the sizing table in section 9.
+> **A note on tail sampling**: The `tail_sampling` processor exists in the OTel Collector and can make per-trace keep/drop decisions based on error status, latency, etc. However, it is **not recommended for production** at this time due to stability concerns and complex scaling requirements — all spans for a given trace must arrive at the same collector instance, which requires the `loadbalancing` exporter and careful management of scaling events. For sampling, prefer **head-based sampling at the SDK level** using the `parentbased_traceidratio` sampler (e.g., `OTEL_TRACES_SAMPLER=parentbased_traceidratio` with `OTEL_TRACES_SAMPLER_ARG=0.1` for 10% sampling). This is simpler, more reliable, and does not require trace-aware routing infrastructure.
 
 ---
 
 ## 3. The `loadbalancing` Exporter
 
-Tail sampling makes a per-trace decision: keep or drop. To make that decision correctly, the sampler must see every span in the trace. In a multi-replica gateway pool behind a standard `ClusterIP` Service, Kubernetes distributes connections randomly. Spans from the same trace land on different gateway pods. Each pod sees an incomplete trace and makes a wrong sampling decision.
+The `loadbalancing` exporter routes spans to specific backend pods using consistent hashing on a key (typically trace ID). This ensures all spans for a given trace reach the same gateway instance — useful for any processing that benefits from seeing complete traces.
 
-The `loadbalancing` exporter solves this by consistent-hashing on the trace ID and routing all spans for a given trace to the same backend pod.
+> **Note**: The primary use case for trace-aware routing was tail sampling, which is **not recommended for production** at this time (see the note in section 2). Without tail sampling, a standard `ClusterIP` Service with round-robin load balancing is sufficient for most Tier 2 deployments. The `loadbalancing` exporter adds operational complexity (headless Services, DNS resolution management, scaling event handling) that is not justified unless you have a specific need for trace-affinity routing. This section is included for reference and as a future consideration if/when tail sampling stabilizes.
 
 ### How it works
 
@@ -423,7 +395,7 @@ spec:
       protocol: TCP
 ```
 
-You also need a regular ClusterIP Service for health checks, metrics scraping, and any non-trace-aware traffic (metrics and logs do not need load balancing by trace ID):
+You also need a regular ClusterIP Service for health checks, metrics scraping, and standard traffic:
 
 ```yaml
 apiVersion: v1
@@ -446,18 +418,16 @@ spec:
       protocol: TCP
 ```
 
-### Tradeoff: scaling events cause brief sampling inaccuracy
+### Tradeoff: scaling events cause routing disruption
 
-When the Tier 2 pool scales up or down, the consistent hash ring changes. During the DNS propagation interval (default 5s, configurable via `resolver.dns.interval`), some spans for in-flight traces will route to the wrong pod. The old pod has half the trace, the new pod has the other half. Both make sampling decisions on incomplete data.
-
-**Duration of inaccuracy**: roughly `resolver.dns.interval` + `tail_sampling.decision_wait` in the worst case. With `interval: 5s` and `decision_wait: 30s`, traces that were in-flight during the scaling event may be incorrectly sampled for up to 35 seconds.
+When the Tier 2 pool scales up or down, the consistent hash ring changes. During the DNS propagation interval (default 5s, configurable via `resolver.dns.interval`), some spans for in-flight traces will route to a different pod than their siblings.
 
 **Mitigation**:
 
 - Set `resolver.dns.interval: 5s` (the minimum practical value — lower causes excessive DNS queries).
-- Accept that scaling events cause brief sampling inaccuracy. For most organizations, 30 seconds of slightly-off sampling during a scale event is acceptable.
 - Scale the Tier 2 pool conservatively: use the HPA `scaleDown.stabilizationWindowSeconds: 300` to avoid flapping, and `scaleUp.policies` that add at most 2 pods per minute.
-- If you cannot tolerate any sampling inaccuracy, do not use tail sampling. Use head sampling at the SDK level instead (see chapter 06 for the tradeoffs).
+
+**For most deployments, a standard ClusterIP Service is sufficient.** Only use the `loadbalancing` exporter if you have a concrete requirement for trace-affinity routing.
 
 ---
 
@@ -468,7 +438,7 @@ For multi-region deployments with regulatory constraints or throughput exceeding
 | Tier | Location | Responsibilities |
 |------|----------|-----------------|
 | **Tier 1** | Per cluster | Filtering, attribute enrichment, batching, cluster tagging |
-| **Tier 2** | Per region | Trace-aware routing (`loadbalancing` exporter), tail sampling, regional compliance processing |
+| **Tier 2** | Per region | Regional compliance processing, transforms, filtering |
 | **Tier 3** | Global (single region) | Unified export to Honeycomb, cross-region aggregation, multi-backend fanout |
 
 ### Architecture
@@ -486,7 +456,7 @@ graph TB
         B_T1 --> US_LB
         US_LB --> US_T2A["Tier 2<br/>Pod A"]
         US_LB --> US_T2B["Tier 2<br/>Pod B"]
-        US_T2A --> US_OUT["US-East<br/>sampled output"]
+        US_T2A --> US_OUT["US-East<br/>processed output"]
         US_T2B --> US_OUT
     end
 
@@ -501,7 +471,7 @@ graph TB
         D_T1 --> EU_LB
         EU_LB --> EU_T2A["Tier 2<br/>Pod A"]
         EU_LB --> EU_T2B["Tier 2<br/>Pod B"]
-        EU_T2A --> EU_OUT["EU-West<br/>sampled output"]
+        EU_T2A --> EU_OUT["EU-West<br/>processed output"]
         EU_T2B --> EU_OUT
     end
 
@@ -532,7 +502,7 @@ graph TB
 
 ### When to use three tiers
 
-- **Regulatory requirement**: EU-origin telemetry must be processed (sampled, filtered, PII-scrubbed) within the EU before any data leaves the region. Tier 2 in EU-West satisfies this — sampled data leaving Tier 2 has already been processed to compliance.
+- **Regulatory requirement**: EU-origin telemetry must be processed (filtered, PII-scrubbed) within the EU before any data leaves the region. Tier 2 in EU-West satisfies this — processed data leaving Tier 2 has already been filtered to compliance.
 - **Throughput > 2M spans/sec aggregate**: two tiers cannot handle the load without an unreasonable number of Tier 2 replicas.
 - **Multi-region backend routing**: some telemetry goes to Honeycomb US, some to Honeycomb EU. Tier 3 handles the routing decision.
 
@@ -555,14 +525,16 @@ When multiple clusters feed into shared gateway tiers, you often need different 
 
 ### Use case
 
-- Production cluster: sample 100% of traces (keep everything).
-- Staging cluster: sample 10% of traces (reduce noise and cost).
-- Dev cluster: sample 1% of traces (minimal retention for debugging).
+- Production cluster: keep 100% of traces.
+- Staging cluster: head-sample at 10% via SDK, or use `probabilistic_sampler` processor.
+- Dev cluster: head-sample at 1% via SDK (minimal retention for debugging).
 
 ### Routing connector config
 
+The recommended approach for per-cluster sampling is to use **head sampling at the SDK level** (set `OTEL_TRACES_SAMPLER=parentbased_traceidratio` with different `OTEL_TRACES_SAMPLER_ARG` values per environment) or the `probabilistic_sampler` processor at the gateway. This avoids the complexity of tail sampling while still providing per-cluster volume control.
+
 ```yaml
-# Tier 2 gateway with per-cluster routing
+# Tier 2 gateway with per-cluster routing and probabilistic sampling
 receivers:
   otlp:
     protocols:
@@ -586,62 +558,25 @@ connectors:
 processors:
   memory_limiter:
     check_interval: 1s
-    limit_mib: 3200
-    spike_limit_mib: 800
+    limit_mib: 1638
+    spike_limit_mib: 400
 
-  # Production: keep all errors and slow traces, sample 50% of the rest
-  tail_sampling/production:
-    decision_wait: 30s
-    num_traces: 100000
-    policies:
-      - name: errors
-        type: status_code
-        status_code:
-          status_codes: [ERROR]
-      - name: slow
-        type: latency
-        latency:
-          threshold_ms: 2000
-      - name: baseline
-        type: probabilistic
-        probabilistic:
-          sampling_percentage: 50
-
-  # Staging: only errors, 10% baseline
-  tail_sampling/staging:
-    decision_wait: 30s
-    num_traces: 50000
-    policies:
-      - name: errors
-        type: status_code
-        status_code:
-          status_codes: [ERROR]
-      - name: baseline
-        type: probabilistic
-        probabilistic:
-          sampling_percentage: 10
-
-  # Dev: only errors, 1% baseline
-  tail_sampling/dev:
-    decision_wait: 15s
-    num_traces: 20000
-    policies:
-      - name: errors
-        type: status_code
-        status_code:
-          status_codes: [ERROR]
-      - name: baseline
-        type: probabilistic
-        probabilistic:
-          sampling_percentage: 1
-
+  # Production: keep all traces (sampling done at SDK level if needed)
   batch/production:
     send_batch_size: 4096
     timeout: 5s
 
+  # Staging: probabilistic 10% sample at the gateway
+  probabilistic_sampler/staging:
+    sampling_percentage: 10
+
   batch/staging:
     send_batch_size: 2048
     timeout: 5s
+
+  # Dev: probabilistic 1% sample at the gateway
+  probabilistic_sampler/dev:
+    sampling_percentage: 1
 
   batch/dev:
     send_batch_size: 1024
@@ -668,19 +603,21 @@ service:
     # Per-cluster processing pipelines
     traces/production:
       receivers: [routing]
-      processors: [tail_sampling/production, batch/production]
+      processors: [batch/production]
       exporters: [otlp/honeycomb]
 
     traces/staging:
       receivers: [routing]
-      processors: [tail_sampling/staging, batch/staging]
+      processors: [probabilistic_sampler/staging, batch/staging]
       exporters: [otlp/honeycomb]
 
     traces/dev:
       receivers: [routing]
-      processors: [tail_sampling/dev, batch/dev]
+      processors: [probabilistic_sampler/dev, batch/dev]
       exporters: [otlp/honeycomb]
 ```
+
+> **Note on probabilistic vs. tail sampling**: The `probabilistic_sampler` processor is a head sampler — it makes per-span decisions without seeing the complete trace. This means it cannot selectively keep error or slow traces while sampling normal traffic. If you need error-aware sampling, implement it at the SDK level: configure the SDK to always record error spans (using a custom sampler or the `parentbased_always_on` sampler with SDK-side filtering) and use head sampling for baseline traffic.
 
 ### Routing fan-out
 
@@ -688,9 +625,9 @@ service:
 graph LR
     INGEST["traces/ingest<br/>receivers: otlp<br/>processors: memory_limiter"] --> ROUTER["routing<br/>connector"]
 
-    ROUTER -->|'k8s.cluster.name<br/>== "production"'| PROD["traces/production<br/>tail_sampling: 50%<br/>errors: 100%"]
-    ROUTER -->|'k8s.cluster.name<br/>== "staging"'| STAGING["traces/staging<br/>tail_sampling: 10%<br/>errors: 100%"]
-    ROUTER -->|'k8s.cluster.name<br/>== "dev"'| DEV["traces/dev<br/>tail_sampling: 1%<br/>errors: 100%"]
+    ROUTER -->|'k8s.cluster.name<br/>== "production"'| PROD["traces/production<br/>100% (no sampling)"]
+    ROUTER -->|'k8s.cluster.name<br/>== "staging"'| STAGING["traces/staging<br/>probabilistic: 10%"]
+    ROUTER -->|'k8s.cluster.name<br/>== "dev"'| DEV["traces/dev<br/>probabilistic: 1%"]
 
     PROD --> HC["otlp/honeycomb"]
     STAGING --> HC
@@ -704,7 +641,7 @@ graph LR
 
 **Important**: the `routing` connector requires the `k8s.cluster.name` resource attribute to be set before data reaches this tier. That is why the Tier 1 config in section 2 includes the `resource/cluster-identity` processor. If the attribute is missing, data falls through to `default_pipelines`.
 
-For signal separation patterns (dedicated Collector pools per signal type), see chapter 05. For tuning the tail sampling memory and decision_wait parameters, see chapter 06.
+For signal separation patterns (dedicated Collector pools per signal type), see chapter 05.
 
 ---
 
@@ -893,7 +830,7 @@ For detailed queue and memory tuning formulas, see chapter 06.
 
 ### Circuit breaker pattern
 
-If Tier 2 is down and you would rather send degraded data (no tail sampling, no transforms) than lose data entirely, configure a fallback exporter on Tier 1 that sends directly to Honeycomb:
+If Tier 2 is down and you would rather send degraded data (no transforms, no filtering) than lose data entirely, configure a fallback exporter on Tier 1 that sends directly to Honeycomb:
 
 ```yaml
 # Tier 1 circuit breaker — fallback direct-to-Honeycomb export
@@ -914,7 +851,7 @@ exporters:
       max_elapsed_time: 120s    # Stop retrying after 2 min
 
   # Fallback: direct to Honeycomb, bypassing Tier 2
-  # Data arrives unsampled and un-transformed — but it arrives
+  # Data arrives un-transformed — but it arrives
   otlp/honeycomb-fallback:
     endpoint: api.honeycomb.io:443
     headers:
@@ -947,17 +884,17 @@ For most organizations, the right answer is: size Tier 2 for high availability (
 
 ## 8. Regional Gateway Configuration (Complete)
 
-This is a complete, production-ready config for a Tier 2 regional gateway with tail sampling. Copy it, change the environment-specific values, and deploy.
+This is a complete, production-ready config for a Tier 2 regional gateway. Copy it, change the environment-specific values, and deploy.
 
 ```yaml
 # configs/tiered-gateway-regional.yaml
 # Tier 2 regional gateway — complete production config
 #
-# Deploy as: Deployment with 10+ replicas in the infrastructure cluster
-# Memory limit: 4Gi per replica (tail sampling is the primary consumer)
-# GOMEMLIMIT: 3200MiB (~80% of 4Gi)
+# Deploy as: Deployment with 5+ replicas in the infrastructure cluster
+# Memory limit: 2Gi per replica
+# GOMEMLIMIT: 1638MiB (~80% of 2Gi)
 #
-# Receives from: Tier 1 gateways in all clusters (via loadbalancing exporter)
+# Receives from: Tier 1 gateways in all clusters
 # Exports to: Honeycomb (OTLP/gRPC)
 
 receivers:
@@ -977,8 +914,8 @@ processors:
   # First in the pipeline. Always.
   memory_limiter:
     check_interval: 1s
-    limit_mib: 3200       # 80% of 4Gi container limit
-    spike_limit_mib: 800  # 25% of limit_mib
+    limit_mib: 1638       # 80% of 2Gi container limit
+    spike_limit_mib: 400  # ~25% of limit_mib
 
   # Normalize semantic conventions across clusters
   transform/normalize:
@@ -996,40 +933,6 @@ processors:
             where attributes["url.full"] != nil
           # Cap attribute value length — Honeycomb has a 64KB per-event limit
           - truncate_all(attributes, 8192)
-
-  # Tail sampling — the primary reason this tier exists
-  #
-  # Memory math:
-  #   num_traces: 200,000
-  #   Average trace size: ~10 KB (5 spans x 2KB each)
-  #   Buffer memory: 200,000 x 10 KB = ~2 GB
-  #   This leaves ~1.2 GB for everything else (queues, batch buffers, Go runtime)
-  #
-  # Policy evaluation order matters. Policies are evaluated top-to-bottom.
-  # A trace is kept if ANY policy decides to keep it (OR logic).
-  tail_sampling:
-    decision_wait: 30s
-    num_traces: 200000
-    expected_new_traces_per_sec: 50000
-    policies:
-      # 1. Always sample errors — these are the traces you will debug
-      - name: errors-keep-all
-        type: status_code
-        status_code:
-          status_codes:
-            - ERROR
-
-      # 2. Always sample slow traces — latency outliers are valuable
-      - name: slow-traces-keep-all
-        type: latency
-        latency:
-          threshold_ms: 2000
-
-      # 3. Probabilistic baseline — keep 10% of normal traffic
-      - name: probabilistic-baseline
-        type: probabilistic
-        probabilistic:
-          sampling_percentage: 10
 
   batch:
     send_batch_size: 4096
@@ -1066,9 +969,8 @@ service:
       receivers: [otlp]
       processors:
         - memory_limiter           # First: prevent OOM
-        - transform/normalize      # Second: normalize before sampling
-        - tail_sampling             # Third: sampling on normalized data
-        - batch                    # Last: batch after sampling reduces volume
+        - transform/normalize      # Second: normalize attributes
+        - batch                    # Last: batch for efficient export
       exporters: [otlp/honeycomb]
     metrics:
       receivers: [otlp]
@@ -1093,6 +995,8 @@ service:
         service: tier2-gateway
 ```
 
+> **Note on sampling**: If you need to reduce trace volume, the recommended approach is head sampling at the SDK level (`OTEL_TRACES_SAMPLER=parentbased_traceidratio`). For gateway-level sampling, use the `probabilistic_sampler` processor. See the per-cluster routing example in section 5.
+
 Full config at `configs/tiered-gateway-regional.yaml`.
 
 ---
@@ -1109,35 +1013,35 @@ Full config at `configs/tiered-gateway-regional.yaml`.
 
 ### Memory per replica by tier
 
-| Tier | With tail sampling | Without tail sampling | Why the difference |
-|------|-------------------|----------------------|-------------------|
-| Tier 1 | 2Gi | 2Gi | T1 never does tail sampling |
-| Tier 2 | 4Gi | 2Gi | Tail sampling trace buffer is ~2 GB at 200K concurrent traces |
-| Tier 3 | 4Gi | 2Gi | T3 may aggregate or re-sample; if not, 2Gi is sufficient |
+| Tier | Memory | Notes |
+|------|--------|-------|
+| Tier 1 | 2Gi | Light processing: filter, truncate, batch |
+| Tier 2 | 2Gi | Transforms, filtering, batch, export |
+| Tier 3 | 2Gi | Batching and export; increase if doing heavy transforms |
 
 ### CPU per replica
 
 | Tier | CPU request | Notes |
 |------|------------|-------|
 | Tier 1 | 500m - 1000m | Light processing: filter, truncate, batch |
-| Tier 2 | 1000m - 2000m | Tail sampling is CPU-intensive (hash computation, policy evaluation) |
+| Tier 2 | 1000m - 2000m | Transform processing and export |
 | Tier 3 | 1000m - 2000m | Batching and export; CPU depends on compression and serialization |
 
 No CPU limits. Same reasoning as chapter 02: CPU throttling on a collector causes backpressure to cascade upstream.
 
 ### Total resource cost example
 
-A 2M spans/sec deployment with two tiers, 3 clusters, tail sampling at Tier 2:
+A 2M spans/sec deployment with two tiers, 3 clusters:
 
 | Component | Replicas | CPU request (each) | Memory limit (each) | Total CPU | Total memory |
 |-----------|----------|-------------------|---------------------|-----------|-------------|
 | Tier 1 (Cluster A) | 10 | 1000m | 2Gi | 10 cores | 20Gi |
 | Tier 1 (Cluster B) | 10 | 1000m | 2Gi | 10 cores | 20Gi |
 | Tier 1 (Cluster C) | 10 | 1000m | 2Gi | 10 cores | 20Gi |
-| Tier 2 (regional) | 20 | 2000m | 4Gi | 40 cores | 80Gi |
-| **Total** | **50** | | | **70 cores** | **140Gi** |
+| Tier 2 (regional) | 20 | 2000m | 2Gi | 40 cores | 40Gi |
+| **Total** | **50** | | | **70 cores** | **100Gi** |
 
-At on-demand pricing (m5.2xlarge at ~$0.384/hr, 8 vCPU, 32 GiB), you need roughly 9 nodes for this pool. That is ~$2,500/month in compute. Spot instances cut this by 60-70% if your workload tolerates interruptions (gateway pods are stateless and restart cleanly).
+At on-demand pricing (m5.2xlarge at ~$0.384/hr, 8 vCPU, 32 GiB), you need roughly 5 nodes for this pool. That is ~$1,400/month in compute. Spot instances cut this by 60-70% if your workload tolerates interruptions (gateway pods are stateless and restart cleanly).
 
 Compare this to the cost of the telemetry data itself at the backend. At 2M spans/sec and 10% sampling, you are sending ~200K spans/sec to Honeycomb. That volume drives backend costs far higher than the infrastructure cost of the collectors. The collector infrastructure is not the expensive part of your observability pipeline.
 
@@ -1161,10 +1065,9 @@ For detailed tuning of batch sizes, queue depths, and memory limiter thresholds,
 
 | Decision | Choose this | When |
 |----------|------------|------|
-| Single-tier (ch 03) | 1 cluster, < 500K spans/sec, no tail sampling across clusters | Most organizations |
-| Two-tier | Multiple clusters, 500K-5M spans/sec, tail sampling needed | Medium-to-large platform teams |
+| Single-tier (ch 03) | 1 cluster, < 500K spans/sec | Most organizations |
+| Two-tier | Multiple clusters, 500K-5M spans/sec | Medium-to-large platform teams |
 | Three-tier | Multi-region regulatory requirements, > 5M spans/sec | Large enterprises with compliance mandates |
-| `loadbalancing` exporter | Any tier that feeds into a tail sampling tier | Required for correct tail sampling |
 | `routing` connector | Different processing per cluster or environment | Multi-cluster with different sampling policies |
 | mTLS (manual) | Cross-cluster communication without a service mesh | No mesh, or mesh not trusted for this traffic |
 | Service mesh mTLS | Cross-cluster communication with existing mesh | Mesh already deployed and operational |
