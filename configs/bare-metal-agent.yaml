@@ -1,8 +1,8 @@
 # =============================================================================
-# OTel Collector Agent — Bare Metal / VM Host Configuration
+# OTel Collector Agent -- Bare Metal / VM Host Configuration
 # =============================================================================
 #
-# Referenced from: Chapter 08 — Bare Metal and VMs
+# Referenced from: Chapter 08 -- Bare Metal and VMs
 #
 # Purpose:
 #   This config runs as a systemd service on a bare metal server or VM. It
@@ -53,11 +53,11 @@ receivers:
     scrapers:
       cpu:        # system.cpu.time, system.cpu.utilization per-core
       memory:     # system.memory.usage (used, free, buffered, cached)
-      disk:       # system.disk.io — critical for detecting I/O bottlenecks
-      filesystem: # system.filesystem.usage — alerts before disks fill up
-      network:    # system.network.io — traffic and error counters per interface
-      load:       # system.cpu.load_average — classic Unix load metric
-      paging:     # system.paging.usage — swap usage indicates memory pressure
+      disk:       # system.disk.io -- critical for detecting I/O bottlenecks
+      filesystem: # system.filesystem.usage -- alerts before disks fill up
+      network:    # system.network.io -- traffic and error counters per interface
+      load:       # system.cpu.load_average -- classic Unix load metric
+      paging:     # system.paging.usage -- swap usage indicates memory pressure
       process:
         # Only collect per-process metrics for known application processes.
         # Collecting metrics for ALL processes is expensive and noisy.
@@ -191,7 +191,7 @@ exporters:
   otlp/gateway:
     endpoint: ${env:OTEL_GATEWAY_ENDPOINT}
     tls:
-      # TLS enabled — traffic leaves the host network.
+      # TLS enabled -- traffic leaves the host network.
       # Set to true only if the gateway terminates TLS at a load balancer
       # and you're on a trusted internal network.
       insecure: false
@@ -200,7 +200,7 @@ exporters:
       enabled: true
       queue_size: 256
       # Persistent queue backed by local disk via the file_storage extension.
-      # This survives collector restarts — critical for bare metal where
+      # This survives collector restarts -- critical for bare metal where
       # network outages to the gateway can last minutes. Without this,
       # in-memory queued data is lost on restart.
       storage: file_storage
@@ -208,7 +208,7 @@ exporters:
       enabled: true
       initial_interval: 5s
       max_interval: 30s
-      # 5 minutes max retry — bare metal agents may face longer network
+      # 5 minutes max retry -- bare metal agents may face longer network
       # interruptions than in-cluster agents. The persistent queue provides
       # additional durability beyond this retry window.
       max_elapsed_time: 300s
@@ -222,7 +222,7 @@ extensions:
   # File storage for persistent sending queues.
   # Data is stored as protobuf files in this directory. Ensure the directory
   # exists and is writable by the otelcol user.
-  # Size on disk depends on queue_size and batch sizes — typically <100MB.
+  # Size on disk depends on queue_size and batch sizes -- typically <100MB.
   file_storage:
     directory: /var/lib/otelcol/storage
 

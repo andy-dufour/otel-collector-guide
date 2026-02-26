@@ -1,8 +1,8 @@
 # =============================================================================
-# OTel Collector Agent — Kubernetes DaemonSet Configuration
+# OTel Collector Agent -- Kubernetes DaemonSet Configuration
 # =============================================================================
 #
-# Referenced from: Chapter 03 — Agent+Gateway Topology
+# Referenced from: Chapter 03 -- Agent+Gateway Topology
 #
 # Purpose:
 #   This config runs as a DaemonSet agent on every Kubernetes node. It collects
@@ -155,7 +155,7 @@ processors:
           key: app.kubernetes.io/managed-by
           from: pod
     filter:
-      # Only watch pods on this node — critical for memory efficiency.
+      # Only watch pods on this node -- critical for memory efficiency.
       # Without this, the agent caches ALL pods in the cluster.
       node_from_env_var: K8S_NODE_NAME
 
@@ -176,9 +176,9 @@ processors:
   # ---------------------------------------------------------------------------
   # Batch: group telemetry into larger payloads for efficient export
   # ---------------------------------------------------------------------------
-  # send_batch_size: 1024 — flush when we accumulate this many items.
-  # send_batch_max_size: 2048 — hard cap per batch to avoid oversized payloads.
-  # timeout: 1s — flush at least every second for low-latency forwarding.
+  # send_batch_size: 1024 -- flush when we accumulate this many items.
+  # send_batch_max_size: 2048 -- hard cap per batch to avoid oversized payloads.
+  # timeout: 1s -- flush at least every second for low-latency forwarding.
   # Agents use smaller batches and shorter timeouts than gateways because
   # latency to the gateway is low (in-cluster) and we want timely delivery.
   batch:
@@ -202,14 +202,14 @@ exporters:
     compression: zstd
     sending_queue:
       enabled: true
-      # 256 batches in queue — at 1024 items/batch this buffers ~260k items.
+      # 256 batches in queue -- at 1024 items/batch this buffers ~260k items.
       # Sized for short gateway outages; the agent should not buffer long-term.
       queue_size: 256
     retry_on_failure:
       enabled: true
       initial_interval: 5s   # First retry after 5s
       max_interval: 30s      # Cap exponential backoff at 30s
-      max_elapsed_time: 120s # Give up after 2 minutes — agent memory is limited
+      max_elapsed_time: 120s # Give up after 2 minutes -- agent memory is limited
 
 extensions:
   # Health check endpoint for Kubernetes liveness/readiness probes.
@@ -218,7 +218,7 @@ extensions:
     endpoint: 0.0.0.0:13133
 
   # zPages provides in-process debugging at http://localhost:55679/debug/tracez.
-  # Bound to localhost only — not exposed outside the pod.
+  # Bound to localhost only -- not exposed outside the pod.
   zpages:
     endpoint: localhost:55679
 

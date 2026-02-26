@@ -1,8 +1,8 @@
 # =============================================================================
-# OTel Collector Gateway — Dedicated Metrics + Logs Pipeline
+# OTel Collector Gateway -- Dedicated Metrics + Logs Pipeline
 # =============================================================================
 #
-# Referenced from: Chapter 05 — Signal Separation
+# Referenced from: Chapter 05 -- Signal Separation
 #
 # Purpose:
 #   This config runs as a combined metrics+logs gateway, separate from the
@@ -13,8 +13,8 @@
 #
 #   Metrics and logs are combined in one gateway because:
 #   1. Neither requires tail sampling (which demands dedicated resources).
-#   2. Their traffic patterns are complementary — metrics are steady,
-#      logs spike during incidents — so they share capacity well.
+#   2. Their traffic patterns are complementary -- metrics are steady,
+#      logs spike during incidents -- so they share capacity well.
 #   3. Fewer deployments to manage than full 3-way signal separation.
 #
 #   Each signal gets its own pipeline with independently tuned batch
@@ -87,7 +87,7 @@ processors:
   # Metrics arrive at regular intervals (collection_interval aligned).
   # Moderate batch size (2048) keeps payloads reasonable.
   # Longer timeout (5s) is fine because metrics are aggregated over time
-  # anyway — a few extra seconds of latency is invisible in dashboards
+  # anyway -- a few extra seconds of latency is invisible in dashboards
   # and alerts that typically evaluate over 1-5 minute windows.
   batch/metrics:
     send_batch_size: 2048
@@ -119,7 +119,7 @@ exporters:
     sending_queue:
       enabled: true
       # Smaller queue than the traces gateway (3000 vs 5000) because:
-      # 1. Metrics are steady-state — no sudden bursts to absorb.
+      # 1. Metrics are steady-state -- no sudden bursts to absorb.
       # 2. Logs can tolerate some data loss better than traces during outages.
       # 3. Keeps memory usage predictable for this combined gateway.
       queue_size: 3000
@@ -142,15 +142,15 @@ service:
 
   pipelines:
     # =========================================================================
-    # Separate pipelines for metrics and logs — each with its own batch
+    # Separate pipelines for metrics and logs -- each with its own batch
     # processor tuned for the signal's traffic pattern.
-    # No traces pipeline — traces go to the dedicated traces gateway.
+    # No traces pipeline -- traces go to the dedicated traces gateway.
     # =========================================================================
 
     metrics:
       receivers: [otlp]
       # Metrics: limit -> batch/metrics (steady traffic, moderate batches)
-      # No filter needed — metric noise is handled via drop/exclude at the
+      # No filter needed -- metric noise is handled via drop/exclude at the
       # receiver level or via the agent's resource/metric filter.
       processors: [memory_limiter, batch/metrics]
       exporters: [otlp/honeycomb]

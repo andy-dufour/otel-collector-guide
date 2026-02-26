@@ -1,8 +1,8 @@
 # =============================================================================
-# OTel Collector Gateway — Dedicated Traces Pipeline
+# OTel Collector Gateway -- Dedicated Traces Pipeline
 # =============================================================================
 #
-# Referenced from: Chapter 05 — Signal Separation
+# Referenced from: Chapter 05 -- Signal Separation
 #
 # Purpose:
 #   This config runs as a dedicated traces gateway, handling ONLY trace data.
@@ -40,7 +40,7 @@ receivers:
   # ---------------------------------------------------------------------------
   # Even though this gateway only processes traces, the OTLP receiver accepts
   # all signal types on the same port. Signal routing happens at the pipeline
-  # level — only a traces pipeline is defined in the service section below.
+  # level -- only a traces pipeline is defined in the service section below.
   # Any metrics or logs that accidentally arrive will be silently dropped.
   otlp:
     protocols:
@@ -61,7 +61,7 @@ processors:
   # ---------------------------------------------------------------------------
   # Formula: limit_mib = container_limit(2Gi=2048) * 0.80 = 1638
   #          spike_limit_mib = container_limit(2Gi=2048) * 0.20 = 409
-  # Traces are bursty — a single microservice request can fan out to dozens
+  # Traces are bursty -- a single microservice request can fan out to dozens
   # of spans across services. The spike limit accommodates these bursts.
   memory_limiter:
     limit_mib: 1638
@@ -73,7 +73,7 @@ processors:
   # ---------------------------------------------------------------------------
   # Health/readiness/liveness probes generate enormous span volume with zero
   # diagnostic value. On a cluster with 500 pods checked every 10s, that's
-  # 3000 spans/s of pure noise — more than most application traffic.
+  # 3000 spans/s of pure noise -- more than most application traffic.
   filter/noise:
     error_mode: ignore
     traces:
@@ -132,7 +132,7 @@ service:
 
   pipelines:
     # =========================================================================
-    # ONLY a traces pipeline — this is a dedicated traces gateway.
+    # ONLY a traces pipeline -- this is a dedicated traces gateway.
     # No metrics or logs pipelines are defined. Any non-trace telemetry
     # received on the OTLP endpoint will be dropped.
     # =========================================================================

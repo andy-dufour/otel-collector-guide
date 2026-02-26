@@ -1,8 +1,8 @@
 # =============================================================================
-# OTel Collector Tier 2 Regional Gateway — Tail Sampling Configuration
+# OTel Collector Tier 2 Regional Gateway -- Tail Sampling Configuration
 # =============================================================================
 #
-# Referenced from: Chapter 04 — Tiered Gateways
+# Referenced from: Chapter 04 -- Tiered Gateways
 #
 # Purpose:
 #   This config runs as a Tier 2 regional gateway that performs tail sampling
@@ -14,7 +14,7 @@
 # Prerequisites:
 #   - OTel Collector deployed as a StatefulSet or Deployment (3+ replicas)
 #   - Container resource limits: 4Gi memory, 2 CPU
-#     (tail sampling holds complete traces in memory — needs significant RAM)
+#     (tail sampling holds complete traces in memory -- needs significant RAM)
 #   - Load balancing MUST use trace-aware routing (e.g., the loadbalancing
 #     exporter at Tier 1, or consistent-hash LB) so all spans for a trace
 #     reach the same Tier 2 instance.
@@ -57,7 +57,7 @@ processors:
   # PROCESSOR ORDERING WARNING:
   # memory_limiter MUST be first. Transform runs before tail_sampling to
   # ensure normalized attributes are available for sampling policy evaluation.
-  # tail_sampling MUST run before batch — it buffers traces internally and
+  # tail_sampling MUST run before batch -- it buffers traces internally and
   # emits sampled traces, which then get batched for export.
   # ===========================================================================
 
@@ -104,7 +104,7 @@ processors:
   # ---------------------------------------------------------------------------
   # Tail sampling waits for the full trace (or decision_wait timeout) before
   # deciding whether to keep or drop the trace. This enables policies that
-  # consider the entire trace shape — errors, latency, etc.
+  # consider the entire trace shape -- errors, latency, etc.
   #
   # TRADE-OFFS:
   # - Adds decision_wait latency (10s) before traces are exported.
@@ -155,7 +155,7 @@ processors:
           sampling_percentage: 10
 
       # -----------------------------------------------------------------------
-      # Policy 4: Composite policy — priority-based combination
+      # Policy 4: Composite policy -- priority-based combination
       # -----------------------------------------------------------------------
       # The composite policy combines the above with explicit priority order.
       # This ensures errors and slow traces are ALWAYS kept (rate 100%),
@@ -183,10 +183,10 @@ processors:
               probabilistic:
                 sampling_percentage: 10
           rate_allocation:
-            # Errors get highest priority — allocate 30% of budget.
+            # Errors get highest priority -- allocate 30% of budget.
             - policy: always-sample-errors
               percent: 30
-            # Slow traces get second priority — allocate 20% of budget.
+            # Slow traces get second priority -- allocate 20% of budget.
             - policy: always-sample-slow
               percent: 20
             # Baseline sampling gets the remaining 50%.
@@ -196,7 +196,7 @@ processors:
   # ---------------------------------------------------------------------------
   # Batch: group sampled traces for efficient export
   # ---------------------------------------------------------------------------
-  # Runs AFTER tail_sampling — only sampled traces reach this point.
+  # Runs AFTER tail_sampling -- only sampled traces reach this point.
   # Larger batches are efficient because the regional gateway sends over
   # the internet to Honeycomb.
   batch:
@@ -216,7 +216,7 @@ exporters:
     sending_queue:
       enabled: true
       # Larger queue than a standard gateway because tail sampling introduces
-      # bursty output — traces accumulate during decision_wait and flush
+      # bursty output -- traces accumulate during decision_wait and flush
       # in waves. 10,000 batches provides substantial buffer for backend
       # hiccups without risking OOM (queue metadata is small).
       queue_size: 10000
