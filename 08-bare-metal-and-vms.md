@@ -1,9 +1,3 @@
----
-title: "08 — Bare Metal and VMs"
-nav_order: 8
-render_with_liquid: false
----
-
 # Chapter 08 — Bare Metal and VMs
 
 > **Audience**: SREs and platform engineers deploying the OTel Collector on non-Kubernetes

@@ -1,9 +1,3 @@
----
-title: "05 — Signal Separation"
-nav_order: 5
-render_with_liquid: false
----
-
 # Chapter 05 — Signal Separation
 
 Traces, metrics, and logs have fundamentally different traffic profiles. When you push all three through a single collector pipeline, you are betting that no single signal will ever spike hard enough to destabilize the others. That bet loses eventually. This chapter covers how to split signals into separate processing paths so that a metrics scrape storm does not OOM the collector that is also handling your traces.

@@ -1,9 +1,3 @@
----
-title: "04 — Tiered Gateways"
-nav_order: 4
-render_with_liquid: false
----
-
 # Chapter 04 — Tiered Gateways
 
 Multi-tier gateway architectures for organizations that have outgrown a single gateway pool. This chapter covers two-tier and three-tier topologies, the `loadbalancing` exporter for trace-aware routing, multi-cluster routing, cross-cluster authentication, failure cascades, and sizing guidance.

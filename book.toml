@@ -1,0 +1,12 @@
+[book]
+title = "OTel Collector Migration Guide"
+description = "A field guide for SREs and platform engineers migrating to the OpenTelemetry Collector"
+language = "en"
+src = "."
+
+[output.html]
+default-theme = "navy"
+preferred-dark-theme = "navy"
+git-repository-url = "https://github.com/andy-dufour/otel-collector-guide"
+additional-js = ["mermaid-init.js"]
+additional-css = ["mermaid.css"]

@@ -1,9 +1,3 @@
----
-title: "01 — Migration Phases"
-nav_order: 1
-render_with_liquid: false
----
-
 # Chapter 1: Migration Phases
 
 > **Audience**: SREs and platform engineers migrating from Datadog, New Relic, or Splunk
