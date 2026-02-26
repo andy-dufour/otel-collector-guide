@@ -1,3 +1,7 @@
+---
+render_with_liquid: false
+---
+
 # Chapter 10 — Vendor-Specific Migration Runbooks
 
 > **Audience**: SREs and platform engineers currently running Datadog, New Relic, Splunk,

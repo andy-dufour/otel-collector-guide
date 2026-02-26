@@ -1,3 +1,7 @@
+---
+render_with_liquid: false
+---
+
 # Chapter 06 — Tuning for Production
 
 This is the chapter you will bookmark. Every tuning parameter in the OTel Collector has a number, and every number has a formula behind it. This chapter gives you those formulas with worked examples so you can derive the right values for your throughput, not copy someone else's defaults and hope they fit.

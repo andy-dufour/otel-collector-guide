@@ -1,3 +1,7 @@
+---
+render_with_liquid: false
+---
+
 # OTel Collector Migration Guide
 
 A field guide for SREs and platform engineers migrating production observability from vendor agents (Datadog, New Relic, Splunk) to the upstream OpenTelemetry Collector, with Honeycomb as the target backend. Every recommendation includes the config to implement it, the math behind the sizing, what breaks when it fails, and what you trade away by choosing it.

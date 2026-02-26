@@ -1,3 +1,7 @@
+---
+render_with_liquid: false
+---
+
 # Chapter 02 — Deployment Modes
 
 Three ways to run the OTel Collector in Kubernetes. Each one trades off isolation, operational complexity, and resource cost differently. Most production clusters end up using two of the three simultaneously.

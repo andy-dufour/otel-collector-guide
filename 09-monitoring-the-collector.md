@@ -1,3 +1,7 @@
+---
+render_with_liquid: false
+---
+
 # Chapter 09 — Monitoring the Collector
 
 > **Audience**: SREs and platform engineers running the OTel Collector in production.

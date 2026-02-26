@@ -1,3 +1,7 @@
+---
+render_with_liquid: false
+---
+
 # Chapter 07 — Backpressure Handling
 
 Every system has a throughput ceiling. When you hit it, something has to give: either the system slows down gracefully, or it breaks catastrophically. Backpressure is the mechanism that turns catastrophic failure into graceful degradation. This chapter covers how backpressure propagates through an OTel Collector pipeline, what configuration controls each stage, and how to build a system that sheds load deliberately instead of crashing randomly.

@@ -1,3 +1,7 @@
+---
+render_with_liquid: false
+---
+
 # Chapter 03 — Agent + Gateway Topology
 
 > **Audience**: SREs and platform engineers deploying the canonical two-tier OTel Collector
