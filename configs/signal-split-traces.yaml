@@ -1,0 +1,149 @@
+# =============================================================================
+# OTel Collector Gateway — Dedicated Traces Pipeline
+# =============================================================================
+#
+# Referenced from: Chapter 05 — Signal Separation
+#
+# Purpose:
+#   This config runs as a dedicated traces gateway, handling ONLY trace data.
+#   In a signal-separated architecture, traces, metrics, and logs each get
+#   their own gateway fleet:
+#
+#     Agents -> traces-gateway (this config)  -> backend
+#     Agents -> metrics-logs-gateway           -> backend
+#
+#   Signal separation allows independent scaling and tuning:
+#   - Traces are bursty (one request = many spans) and benefit from larger
+#     batch sizes and more aggressive compression.
+#   - Metrics are steady-state and predictable.
+#   - Logs are high-volume and can tolerate more latency.
+#
+# Prerequisites:
+#   - OTel Collector deployed as a Deployment (2-5 replicas)
+#   - Container resource limits: 2Gi memory, 1 CPU
+#   - Kubernetes Service routing ONLY trace traffic to this Deployment
+#     (agents configured with separate endpoints per signal type)
+#   - Environment variable: HONEYCOMB_API_KEY
+#
+# Why separate traces?
+#   1. Tail sampling (if added later) requires dedicated memory and CPU.
+#   2. Trace volume spikes during incidents when you need observability most.
+#   3. Independent HPA scaling based on trace-specific queue depth metrics.
+#   4. Processor tuning (batch sizes, timeouts) optimized for trace patterns.
+#
+# Required Collector distribution: contrib (for filter processor)
+# =============================================================================
+
+receivers:
+  # ---------------------------------------------------------------------------
+  # OTLP receiver: accept trace telemetry from agents
+  # ---------------------------------------------------------------------------
+  # Even though this gateway only processes traces, the OTLP receiver accepts
+  # all signal types on the same port. Signal routing happens at the pipeline
+  # level — only a traces pipeline is defined in the service section below.
+  # Any metrics or logs that accidentally arrive will be silently dropped.
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  # ===========================================================================
+  # PROCESSOR ORDERING WARNING:
+  # memory_limiter MUST be first. filter removes noise before batch to avoid
+  # wasting batch capacity on data we're going to drop. batch MUST be last.
+  # ===========================================================================
+
+  # ---------------------------------------------------------------------------
+  # Memory limiter: backpressure valve
+  # ---------------------------------------------------------------------------
+  # Formula: limit_mib = container_limit(2Gi=2048) * 0.80 = 1638
+  #          spike_limit_mib = container_limit(2Gi=2048) * 0.20 = 409
+  # Traces are bursty — a single microservice request can fan out to dozens
+  # of spans across services. The spike limit accommodates these bursts.
+  memory_limiter:
+    limit_mib: 1638
+    spike_limit_mib: 409
+    check_interval: 1s
+
+  # ---------------------------------------------------------------------------
+  # Filter: drop noisy health check spans
+  # ---------------------------------------------------------------------------
+  # Health/readiness/liveness probes generate enormous span volume with zero
+  # diagnostic value. On a cluster with 500 pods checked every 10s, that's
+  # 3000 spans/s of pure noise — more than most application traffic.
+  filter/noise:
+    error_mode: ignore
+    traces:
+      span:
+        # Drop Kubernetes probe spans by URL path (new semconv).
+        - 'IsMatch(attributes["url.path"], "^/(healthz|readyz|livez)$")'
+        # Also match old semconv for broad SDK version coverage.
+        - 'IsMatch(attributes["http.target"], "^/(healthz|readyz|livez)$")'
+
+  # ---------------------------------------------------------------------------
+  # Batch: optimized for bursty trace traffic
+  # ---------------------------------------------------------------------------
+  # Trace traffic is inherently bursty: a single user request generates a
+  # burst of spans that arrive close together. Larger batches (4096) amortize
+  # per-request overhead to Honeycomb. The 2s timeout ensures traces are
+  # exported promptly even during low-traffic periods.
+  #
+  # Compare to metrics (steady, 5s timeout) and logs (high volume, 10s timeout)
+  # in the companion signal-split-metrics-logs.yaml config.
+  batch:
+    send_batch_size: 4096
+    send_batch_max_size: 8192
+    timeout: 2s
+
+exporters:
+  # ---------------------------------------------------------------------------
+  # OTLP exporter: send traces to Honeycomb
+  # ---------------------------------------------------------------------------
+  otlp/honeycomb:
+    endpoint: api.honeycomb.io:443
+    headers:
+      x-honeycomb-team: ${env:HONEYCOMB_API_KEY}
+    compression: zstd
+    sending_queue:
+      enabled: true
+      # 5000 batches * 4096 spans/batch = ~20M span buffer.
+      # Traces are the most critical signal during incidents, so a large
+      # queue ensures we don't drop them during backend slowdowns.
+      queue_size: 5000
+      num_consumers: 10
+    retry_on_failure:
+      enabled: true
+      initial_interval: 5s
+      max_interval: 30s
+      max_elapsed_time: 300s
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+  zpages:
+    endpoint: localhost:55679
+
+service:
+  extensions: [health_check, zpages]
+
+  pipelines:
+    # =========================================================================
+    # ONLY a traces pipeline — this is a dedicated traces gateway.
+    # No metrics or logs pipelines are defined. Any non-trace telemetry
+    # received on the OTLP endpoint will be dropped.
+    # =========================================================================
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, filter/noise, batch]
+      exporters: [otlp/honeycomb]
+
+  telemetry:
+    metrics:
+      # Self-metrics are critical for signal-separated gateways.
+      # Monitor otelcol_exporter_queue_size and otelcol_processor_dropped_spans
+      # to detect when this traces gateway needs to scale independently.
+      address: 0.0.0.0:8888

@@ -1,0 +1,249 @@
+# =============================================================================
+# OTel Collector Agent — Kubernetes DaemonSet Configuration
+# =============================================================================
+#
+# Referenced from: Chapter 03 — Agent+Gateway Topology
+#
+# Purpose:
+#   This config runs as a DaemonSet agent on every Kubernetes node. It collects
+#   telemetry from local pods (OTLP), node-level host metrics, kubelet stats,
+#   and pod logs, then forwards everything to a central gateway.
+#
+# Prerequisites:
+#   - OTel Collector deployed as a DaemonSet (one per node)
+#   - Container resource limits: 512Mi memory, 250m CPU
+#   - ServiceAccount with RBAC for kubelet stats and k8s attributes
+#   - Environment variables: K8S_NODE_NAME (via fieldRef spec.nodeName),
+#     OTEL_ENVIRONMENT, OTEL_CLUSTER_NAME
+#   - Gateway running at otel-gateway.otel-system.svc.cluster.local:4317
+#   - Volumes mounted: /var/log/pods (hostPath), /var/lib/docker/containers
+#
+# Required Collector distribution: contrib (for kubeletstats, k8sattributes,
+#   filelog, hostmetrics receivers)
+# =============================================================================
+
+receivers:
+  # ---------------------------------------------------------------------------
+  # OTLP receiver: accept telemetry from application SDKs
+  # ---------------------------------------------------------------------------
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+  # ---------------------------------------------------------------------------
+  # Host metrics: node-level infrastructure metrics
+  # ---------------------------------------------------------------------------
+  # 30s interval balances freshness with CPU overhead on the node.
+  # Each scraper maps to a family of system metrics (system.cpu.*, etc.).
+  hostmetrics:
+    collection_interval: 30s
+    scrapers:
+      cpu:        # system.cpu.time, system.cpu.utilization
+      memory:     # system.memory.usage, system.memory.utilization
+      disk:       # system.disk.io, system.disk.operations
+      network:    # system.network.io, system.network.connections
+      filesystem: # system.filesystem.usage, system.filesystem.utilization
+      load:       # system.cpu.load_average.1m, 5m, 15m
+      paging:     # system.paging.usage, system.paging.faults
+
+  # ---------------------------------------------------------------------------
+  # Kubelet stats: pod/container-level resource metrics from the kubelet API
+  # ---------------------------------------------------------------------------
+  # auth_type: serviceAccount uses the mounted SA token to authenticate.
+  # insecure_skip_verify: true is required because kubelet uses a self-signed
+  # certificate on most clusters. The endpoint uses the node name so each
+  # DaemonSet pod queries its own node's kubelet.
+  kubeletstats:
+    collection_interval: 30s
+    auth_type: serviceAccount
+    endpoint: https://${env:K8S_NODE_NAME}:10250
+    insecure_skip_verify: true
+
+  # ---------------------------------------------------------------------------
+  # Filelog: collect container logs from the node filesystem
+  # ---------------------------------------------------------------------------
+  # /var/log/pods is the standard Kubernetes log directory. The CRI parser
+  # handles the Container Runtime Interface log format (used by containerd
+  # and CRI-O). start_at: end avoids re-ingesting historical logs on restart.
+  filelog:
+    include:
+      - /var/log/pods/*/*/*.log
+    start_at: end
+    operators:
+      # Parse the CRI log format: <timestamp> <stream> <flags> <log_message>
+      - type: regex_parser
+        id: cri_parser
+        regex: '^(?P<time>[^ ]+) (?P<stream>stdout|stderr) (?P<flags>[^ ]*) (?P<log>.*)'
+        timestamp:
+          parse_from: attributes.time
+          layout: '%Y-%m-%dT%H:%M:%S.%LZ'
+        severity:
+          parse_from: attributes.stream
+          mapping:
+            info: stdout
+            error: stderr
+
+processors:
+  # ===========================================================================
+  # PROCESSOR ORDERING WARNING:
+  # Processors execute in the order listed in each pipeline definition.
+  # memory_limiter MUST be first to protect the collector from OOM.
+  # k8sattributes and resource enrich data and must run before batch.
+  # batch MUST be last to bundle enriched data for efficient export.
+  # ===========================================================================
+
+  # ---------------------------------------------------------------------------
+  # Memory limiter: backpressure valve to prevent OOM kills
+  # ---------------------------------------------------------------------------
+  # Formula: limit_mib = container_limit(512Mi) * 0.80 = 409
+  #          spike_limit_mib = container_limit(512Mi) * 0.20 = 102
+  # The 80% soft limit triggers backpressure (returning errors to receivers).
+  # The spike allowance handles short bursts above the soft limit.
+  # check_interval: 1s is aggressive but necessary for a 512Mi container where
+  # memory can spike quickly under load.
+  memory_limiter:
+    limit_mib: 409
+    spike_limit_mib: 102
+    check_interval: 1s
+
+  # ---------------------------------------------------------------------------
+  # Kubernetes attributes: enrich telemetry with pod/container metadata
+  # ---------------------------------------------------------------------------
+  # Associates incoming telemetry with the source pod using the connection IP.
+  # This works because each pod has a unique IP in Kubernetes networking.
+  # filter.node_from_env_var limits the watch cache to this node's pods only,
+  # reducing memory usage significantly on large clusters.
+  k8sattributes:
+    pod_association:
+      - sources:
+          - from: connection
+            name: ip
+    extract:
+      metadata:
+        - k8s.namespace.name
+        - k8s.pod.name
+        - k8s.pod.uid
+        - k8s.node.name
+        - k8s.deployment.name
+        - k8s.statefulset.name
+        - k8s.daemonset.name
+        - k8s.job.name
+        - k8s.cronjob.name
+        - k8s.container.name
+      labels:
+        # Extract standard Kubernetes recommended labels as resource attributes.
+        # The tag_name uses the label key directly for discoverability.
+        - tag_name: app.kubernetes.io/name
+          key: app.kubernetes.io/name
+          from: pod
+        - tag_name: app.kubernetes.io/instance
+          key: app.kubernetes.io/instance
+          from: pod
+        - tag_name: app.kubernetes.io/version
+          key: app.kubernetes.io/version
+          from: pod
+        - tag_name: app.kubernetes.io/component
+          key: app.kubernetes.io/component
+          from: pod
+        - tag_name: app.kubernetes.io/part-of
+          key: app.kubernetes.io/part-of
+          from: pod
+        - tag_name: app.kubernetes.io/managed-by
+          key: app.kubernetes.io/managed-by
+          from: pod
+    filter:
+      # Only watch pods on this node — critical for memory efficiency.
+      # Without this, the agent caches ALL pods in the cluster.
+      node_from_env_var: K8S_NODE_NAME
+
+  # ---------------------------------------------------------------------------
+  # Resource: add environment and cluster identity attributes
+  # ---------------------------------------------------------------------------
+  # These attributes are essential for filtering and grouping in backends.
+  # Using env vars allows the same config across staging/production.
+  resource:
+    attributes:
+      - key: deployment.environment
+        value: ${env:OTEL_ENVIRONMENT}
+        action: upsert
+      - key: k8s.cluster.name
+        value: ${env:OTEL_CLUSTER_NAME}
+        action: upsert
+
+  # ---------------------------------------------------------------------------
+  # Batch: group telemetry into larger payloads for efficient export
+  # ---------------------------------------------------------------------------
+  # send_batch_size: 1024 — flush when we accumulate this many items.
+  # send_batch_max_size: 2048 — hard cap per batch to avoid oversized payloads.
+  # timeout: 1s — flush at least every second for low-latency forwarding.
+  # Agents use smaller batches and shorter timeouts than gateways because
+  # latency to the gateway is low (in-cluster) and we want timely delivery.
+  batch:
+    send_batch_size: 1024
+    send_batch_max_size: 2048
+    timeout: 1s
+
+exporters:
+  # ---------------------------------------------------------------------------
+  # OTLP exporter: forward all telemetry to the central gateway
+  # ---------------------------------------------------------------------------
+  # tls.insecure: true because traffic stays within the cluster network.
+  # Use mTLS or a service mesh if your security policy requires in-cluster
+  # encryption.
+  # compression: zstd provides ~30% better compression than gzip with lower
+  # CPU overhead, reducing bandwidth between agents and gateway.
+  otlp/gateway:
+    endpoint: otel-gateway.otel-system.svc.cluster.local:4317
+    tls:
+      insecure: true
+    compression: zstd
+    sending_queue:
+      enabled: true
+      # 256 batches in queue — at 1024 items/batch this buffers ~260k items.
+      # Sized for short gateway outages; the agent should not buffer long-term.
+      queue_size: 256
+    retry_on_failure:
+      enabled: true
+      initial_interval: 5s   # First retry after 5s
+      max_interval: 30s      # Cap exponential backoff at 30s
+      max_elapsed_time: 120s # Give up after 2 minutes — agent memory is limited
+
+extensions:
+  # Health check endpoint for Kubernetes liveness/readiness probes.
+  # Bound to 0.0.0.0 so the kubelet can reach it.
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+  # zPages provides in-process debugging at http://localhost:55679/debug/tracez.
+  # Bound to localhost only — not exposed outside the pod.
+  zpages:
+    endpoint: localhost:55679
+
+service:
+  extensions: [health_check, zpages]
+
+  pipelines:
+    traces:
+      receivers: [otlp]
+      # Order: memory_limiter -> k8sattributes -> resource -> batch
+      processors: [memory_limiter, k8sattributes, resource, batch]
+      exporters: [otlp/gateway]
+
+    metrics:
+      receivers: [otlp, hostmetrics, kubeletstats]
+      processors: [memory_limiter, k8sattributes, resource, batch]
+      exporters: [otlp/gateway]
+
+    logs:
+      receivers: [otlp, filelog]
+      processors: [memory_limiter, k8sattributes, resource, batch]
+      exporters: [otlp/gateway]
+
+  telemetry:
+    metrics:
+      # Expose the collector's own metrics for Prometheus scraping.
+      # Useful for monitoring queue depths, dropped items, and throughput.
+      address: 0.0.0.0:8888

@@ -1,0 +1,169 @@
+# =============================================================================
+# OTel Collector Gateway — Dedicated Metrics + Logs Pipeline
+# =============================================================================
+#
+# Referenced from: Chapter 05 — Signal Separation
+#
+# Purpose:
+#   This config runs as a combined metrics+logs gateway, separate from the
+#   traces gateway. In a signal-separated architecture:
+#
+#     Agents -> traces-gateway              -> backend  (signal-split-traces.yaml)
+#     Agents -> metrics-logs-gateway (this) -> backend
+#
+#   Metrics and logs are combined in one gateway because:
+#   1. Neither requires tail sampling (which demands dedicated resources).
+#   2. Their traffic patterns are complementary — metrics are steady,
+#      logs spike during incidents — so they share capacity well.
+#   3. Fewer deployments to manage than full 3-way signal separation.
+#
+#   Each signal gets its own pipeline with independently tuned batch
+#   processors optimized for its traffic pattern.
+#
+# Prerequisites:
+#   - OTel Collector deployed as a Deployment (2-4 replicas)
+#   - Container resource limits: 2Gi memory, 1 CPU
+#   - Kubernetes Service routing metrics+logs traffic to this Deployment
+#   - Environment variable: HONEYCOMB_API_KEY
+#
+# Required Collector distribution: contrib (for filter processor)
+# =============================================================================
+
+receivers:
+  # ---------------------------------------------------------------------------
+  # OTLP receiver: accept metrics and logs from agents
+  # ---------------------------------------------------------------------------
+  # Agents route metrics and logs to this gateway's Service endpoint.
+  # Any trace data that accidentally arrives will be silently dropped
+  # (no traces pipeline is defined).
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  # ===========================================================================
+  # PROCESSOR ORDERING WARNING:
+  # memory_limiter MUST be first in every pipeline. filter/logs runs before
+  # batch/logs to discard noise before batching. Each signal type has its own
+  # batch processor with tuning specific to its traffic pattern.
+  # ===========================================================================
+
+  # ---------------------------------------------------------------------------
+  # Memory limiter: shared across both pipelines
+  # ---------------------------------------------------------------------------
+  # Formula: limit_mib = container_limit(2Gi=2048) * 0.80 = 1638
+  #          spike_limit_mib = container_limit(2Gi=2048) * 0.20 = 409
+  # Metrics and logs together are typically less memory-intensive than traces
+  # (no trace assembly or sampling buffers), but log spikes during incidents
+  # can be significant.
+  memory_limiter:
+    limit_mib: 1638
+    spike_limit_mib: 409
+    check_interval: 1s
+
+  # ---------------------------------------------------------------------------
+  # Filter: drop noisy log records
+  # ---------------------------------------------------------------------------
+  # Health check and probe logs are high-volume noise. Filtering them at the
+  # gateway ensures consistent noise reduction regardless of which agent or
+  # application generated the logs.
+  filter/logs:
+    error_mode: ignore
+    logs:
+      log_record:
+        # Drop Kubernetes health check probe logs.
+        # These appear as access log entries with "kube-probe" user agent.
+        - 'IsMatch(body, "kube-probe")'
+        # Drop health/readiness/liveness endpoint access logs.
+        # Matches common patterns: "GET /healthz", "GET /readyz", "GET /livez"
+        - 'IsMatch(body, "\"GET /(healthz|readyz|livez)")'
+
+  # ---------------------------------------------------------------------------
+  # Batch (metrics): tuned for steady, predictable metric traffic
+  # ---------------------------------------------------------------------------
+  # Metrics arrive at regular intervals (collection_interval aligned).
+  # Moderate batch size (2048) keeps payloads reasonable.
+  # Longer timeout (5s) is fine because metrics are aggregated over time
+  # anyway — a few extra seconds of latency is invisible in dashboards
+  # and alerts that typically evaluate over 1-5 minute windows.
+  batch/metrics:
+    send_batch_size: 2048
+    send_batch_max_size: 4096
+    timeout: 5s
+
+  # ---------------------------------------------------------------------------
+  # Batch (logs): tuned for high-volume, latency-tolerant log traffic
+  # ---------------------------------------------------------------------------
+  # Logs are the highest-volume signal (often 10-100x traces by byte count).
+  # Large batches (8192) maximize compression efficiency and reduce per-request
+  # overhead to the backend. The 10s timeout is acceptable because log queries
+  # are typically retrospective (investigating past incidents), not real-time.
+  # This also smooths out log spikes during deployments and incidents.
+  batch/logs:
+    send_batch_size: 8192
+    send_batch_max_size: 16384
+    timeout: 10s
+
+exporters:
+  # ---------------------------------------------------------------------------
+  # OTLP exporter: send metrics and logs to Honeycomb
+  # ---------------------------------------------------------------------------
+  otlp/honeycomb:
+    endpoint: api.honeycomb.io:443
+    headers:
+      x-honeycomb-team: ${env:HONEYCOMB_API_KEY}
+    compression: zstd
+    sending_queue:
+      enabled: true
+      # Smaller queue than the traces gateway (3000 vs 5000) because:
+      # 1. Metrics are steady-state — no sudden bursts to absorb.
+      # 2. Logs can tolerate some data loss better than traces during outages.
+      # 3. Keeps memory usage predictable for this combined gateway.
+      queue_size: 3000
+      num_consumers: 10
+    retry_on_failure:
+      enabled: true
+      initial_interval: 5s
+      max_interval: 30s
+      max_elapsed_time: 300s
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+  zpages:
+    endpoint: localhost:55679
+
+service:
+  extensions: [health_check, zpages]
+
+  pipelines:
+    # =========================================================================
+    # Separate pipelines for metrics and logs — each with its own batch
+    # processor tuned for the signal's traffic pattern.
+    # No traces pipeline — traces go to the dedicated traces gateway.
+    # =========================================================================
+
+    metrics:
+      receivers: [otlp]
+      # Metrics: limit -> batch/metrics (steady traffic, moderate batches)
+      # No filter needed — metric noise is handled via drop/exclude at the
+      # receiver level or via the agent's resource/metric filter.
+      processors: [memory_limiter, batch/metrics]
+      exporters: [otlp/honeycomb]
+
+    logs:
+      receivers: [otlp]
+      # Logs: limit -> filter noise -> batch/logs (high volume, large batches)
+      processors: [memory_limiter, filter/logs, batch/logs]
+      exporters: [otlp/honeycomb]
+
+  telemetry:
+    metrics:
+      # Monitor otelcol_exporter_queue_size per pipeline to detect when
+      # metrics vs logs need different scaling. If the logs queue consistently
+      # fills while metrics stays low, it may be time to split them too.
+      address: 0.0.0.0:8888

@@ -1,0 +1,269 @@
+# =============================================================================
+# OTel Collector Tier 2 Regional Gateway — Tail Sampling Configuration
+# =============================================================================
+#
+# Referenced from: Chapter 04 — Tiered Gateways
+#
+# Purpose:
+#   This config runs as a Tier 2 regional gateway that performs tail sampling
+#   on traces. In a tiered architecture:
+#     Tier 1 (agents) -> Tier 2 (regional gateways with sampling) -> backend
+#   Regional gateways aggregate traces from multiple clusters in the same
+#   region, apply intelligent sampling decisions, and forward to the backend.
+#
+# Prerequisites:
+#   - OTel Collector deployed as a StatefulSet or Deployment (3+ replicas)
+#   - Container resource limits: 4Gi memory, 2 CPU
+#     (tail sampling holds complete traces in memory — needs significant RAM)
+#   - Load balancing MUST use trace-aware routing (e.g., the loadbalancing
+#     exporter at Tier 1, or consistent-hash LB) so all spans for a trace
+#     reach the same Tier 2 instance.
+#   - Environment variables: HONEYCOMB_API_KEY, OTEL_REGION
+#
+# IMPORTANT: Tail sampling requires ALL spans for a given trace to arrive at
+# the same collector instance. Without trace-aware load balancing, sampling
+# decisions will be incorrect (partial traces sampled/dropped).
+#
+# Required Collector distribution: contrib (for tail_sampling, transform)
+# =============================================================================
+
+receivers:
+  # ---------------------------------------------------------------------------
+  # OTLP receiver: accept telemetry from Tier 1 agents/gateways
+  # ---------------------------------------------------------------------------
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+        # Keepalive settings prevent idle connections from being silently
+        # dropped by intermediate load balancers (AWS NLB, GCP ILB, etc.).
+        keepalive:
+          server_parameters:
+            # Send keepalive ping every 30s on idle connections.
+            time: 30s
+            # Wait 5s for keepalive ack before considering connection dead.
+            timeout: 5s
+          enforcement_policy:
+            # Allow clients to send pings even without active RPCs.
+            permit_without_stream: true
+            # Minimum time between client pings. Prevents aggressive clients
+            # from overloading the server with keepalive traffic.
+            min_time: 10s
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  # ===========================================================================
+  # PROCESSOR ORDERING WARNING:
+  # memory_limiter MUST be first. Transform runs before tail_sampling to
+  # ensure normalized attributes are available for sampling policy evaluation.
+  # tail_sampling MUST run before batch — it buffers traces internally and
+  # emits sampled traces, which then get batched for export.
+  # ===========================================================================
+
+  # ---------------------------------------------------------------------------
+  # Memory limiter: backpressure valve for the high-memory sampling gateway
+  # ---------------------------------------------------------------------------
+  # Formula: limit_mib = container_limit(4Gi=4096) * 0.80 = 3276
+  #          spike_limit_mib = container_limit(4Gi=4096) * 0.20 = 819
+  # Tail sampling requires significantly more memory than passthrough gateways
+  # because it holds complete traces in memory for the decision_wait period.
+  # At 200k traces * ~10 spans/trace * ~2KB/span = ~4GB theoretical max.
+  # The 4Gi container with 80% limit provides safety margin.
+  memory_limiter:
+    limit_mib: 3276
+    spike_limit_mib: 819
+    check_interval: 1s
+
+  # ---------------------------------------------------------------------------
+  # Transform: normalize attributes before sampling decisions
+  # ---------------------------------------------------------------------------
+  # Normalization must happen BEFORE tail_sampling so that sampling policies
+  # can rely on consistent attribute names regardless of SDK version.
+  transform/normalize:
+    trace_statements:
+      - context: span
+        statements:
+          # Migrate HTTP status code from old to new semconv.
+          - set(attributes["http.response.status_code"], attributes["http.status_code"])
+            where attributes["http.status_code"] != nil and attributes["http.response.status_code"] == nil
+
+          # Truncate excessively long attribute values.
+          - truncate_all(attributes, 10000)
+
+      - context: resource
+        statements:
+          # Stamp the region on all telemetry passing through this gateway.
+          # This enables region-scoped queries in the backend and helps
+          # identify which regional gateway processed the data.
+          - set(attributes["cloud.region"], "${env:OTEL_REGION}")
+            where attributes["cloud.region"] == nil
+
+  # ---------------------------------------------------------------------------
+  # Tail sampling: intelligent trace-level sampling decisions
+  # ---------------------------------------------------------------------------
+  # Tail sampling waits for the full trace (or decision_wait timeout) before
+  # deciding whether to keep or drop the trace. This enables policies that
+  # consider the entire trace shape — errors, latency, etc.
+  #
+  # TRADE-OFFS:
+  # - Adds decision_wait latency (10s) before traces are exported.
+  # - Consumes significant memory to buffer in-flight traces.
+  # - Requires trace-aware load balancing (all spans -> same instance).
+  tail_sampling:
+    # Wait up to 10s for all spans in a trace to arrive before making a
+    # decision. Shorter = less memory but risks splitting traces.
+    # 10s works well for most request-scoped traces; increase for long-lived
+    # background jobs.
+    decision_wait: 10s
+    # Maximum number of traces held in memory simultaneously.
+    # Size this based on: (traces_per_second * decision_wait_seconds * 2).
+    # 200k traces at ~10s = supports ~20k traces/second sustained.
+    num_traces: 200000
+    policies:
+      # -----------------------------------------------------------------------
+      # Policy 1: Always keep traces that contain errors
+      # -----------------------------------------------------------------------
+      # Error traces are the highest diagnostic value and are relatively rare
+      # (typically <5% of all traces). Always keeping them ensures no error
+      # is ever lost to sampling.
+      - name: always-sample-errors
+        type: status_code
+        status_code:
+          status_codes:
+            - ERROR
+
+      # -----------------------------------------------------------------------
+      # Policy 2: Always keep slow traces (latency > 2s)
+      # -----------------------------------------------------------------------
+      # Slow traces indicate performance issues. The 2s threshold should be
+      # tuned per service; this is a reasonable default for web backends.
+      - name: always-sample-slow
+        type: latency
+        latency:
+          threshold_ms: 2000
+
+      # -----------------------------------------------------------------------
+      # Policy 3: Probabilistic baseline for normal traces
+      # -----------------------------------------------------------------------
+      # Keep 10% of normal (non-error, non-slow) traces for baseline
+      # visibility. This provides enough data for throughput analysis and
+      # p50/p75 latency calculations while significantly reducing volume.
+      - name: probabilistic-baseline
+        type: probabilistic
+        probabilistic:
+          sampling_percentage: 10
+
+      # -----------------------------------------------------------------------
+      # Policy 4: Composite policy — priority-based combination
+      # -----------------------------------------------------------------------
+      # The composite policy combines the above with explicit priority order.
+      # This ensures errors and slow traces are ALWAYS kept (rate 100%),
+      # while normal traces are sampled down to 10%.
+      #
+      # max_total_spans_per_second caps the overall output to prevent
+      # downstream overload during traffic spikes.
+      - name: composite-policy
+        type: composite
+        composite:
+          max_total_spans_per_second: 50000
+          policy_order: [always-sample-errors, always-sample-slow, probabilistic-baseline]
+          composite_sub_policy:
+            - name: always-sample-errors
+              type: status_code
+              status_code:
+                status_codes:
+                  - ERROR
+            - name: always-sample-slow
+              type: latency
+              latency:
+                threshold_ms: 2000
+            - name: probabilistic-baseline
+              type: probabilistic
+              probabilistic:
+                sampling_percentage: 10
+          rate_allocation:
+            # Errors get highest priority — allocate 30% of budget.
+            - policy: always-sample-errors
+              percent: 30
+            # Slow traces get second priority — allocate 20% of budget.
+            - policy: always-sample-slow
+              percent: 20
+            # Baseline sampling gets the remaining 50%.
+            - policy: probabilistic-baseline
+              percent: 50
+
+  # ---------------------------------------------------------------------------
+  # Batch: group sampled traces for efficient export
+  # ---------------------------------------------------------------------------
+  # Runs AFTER tail_sampling — only sampled traces reach this point.
+  # Larger batches are efficient because the regional gateway sends over
+  # the internet to Honeycomb.
+  batch:
+    send_batch_size: 4096
+    send_batch_max_size: 8192
+    timeout: 2s
+
+exporters:
+  # ---------------------------------------------------------------------------
+  # OTLP exporter: send sampled telemetry to Honeycomb
+  # ---------------------------------------------------------------------------
+  otlp/honeycomb:
+    endpoint: api.honeycomb.io:443
+    headers:
+      x-honeycomb-team: ${env:HONEYCOMB_API_KEY}
+    compression: zstd
+    sending_queue:
+      enabled: true
+      # Larger queue than a standard gateway because tail sampling introduces
+      # bursty output — traces accumulate during decision_wait and flush
+      # in waves. 10,000 batches provides substantial buffer for backend
+      # hiccups without risking OOM (queue metadata is small).
+      queue_size: 10000
+      num_consumers: 10
+    retry_on_failure:
+      enabled: true
+      initial_interval: 5s
+      max_interval: 30s
+      max_elapsed_time: 300s
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+  zpages:
+    endpoint: localhost:55679
+
+  # pprof is especially useful for tail sampling gateways where memory
+  # profiling helps tune num_traces and decision_wait.
+  pprof:
+    endpoint: localhost:1777
+
+service:
+  extensions: [health_check, zpages, pprof]
+
+  pipelines:
+    # Traces get the full tail sampling pipeline.
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, transform/normalize, tail_sampling, batch]
+      exporters: [otlp/honeycomb]
+
+    # Metrics and logs pass through WITHOUT tail sampling.
+    # Tail sampling only applies to traces (it needs complete trace shapes).
+    # Metrics and logs get standard processing: limit -> batch.
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlp/honeycomb]
+
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlp/honeycomb]
+
+  telemetry:
+    metrics:
+      address: 0.0.0.0:8888
+    logs:
+      level: info

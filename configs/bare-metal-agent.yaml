@@ -1,0 +1,253 @@
+# =============================================================================
+# OTel Collector Agent — Bare Metal / VM Host Configuration
+# =============================================================================
+#
+# Referenced from: Chapter 08 — Bare Metal and VMs
+#
+# Purpose:
+#   This config runs as a systemd service on a bare metal server or VM. It
+#   collects host metrics, application logs (JSON), system logs (syslog), and
+#   OTLP telemetry from local applications, then exports to a remote gateway.
+#
+# Prerequisites:
+#   - OTel Collector installed via system package (deb/rpm) or binary
+#   - systemd unit with: MemoryMax=512M, Restart=always
+#   - User: otelcol (with read access to log files and /proc)
+#   - Directory: /var/lib/otelcol/storage (owned by otelcol, for persistent queue)
+#   - Environment variables (in /etc/otelcol/otelcol.conf or systemd env file):
+#     OTEL_GATEWAY_ENDPOINT, OTEL_ENVIRONMENT, OTEL_SERVICE_TEAM
+#   - Application logs written as JSON to /var/log/myapp/*.log
+#   - TLS certificate for gateway connection (if tls.insecure: false)
+#
+# Required Collector distribution: contrib (for hostmetrics, filelog,
+#   resourcedetection processors)
+#
+# Installation example:
+#   sudo apt-get install otelcol-contrib
+#   sudo mkdir -p /var/lib/otelcol/storage
+#   sudo chown otelcol:otelcol /var/lib/otelcol/storage
+#   sudo systemctl enable --now otelcol
+# =============================================================================
+
+receivers:
+  # ---------------------------------------------------------------------------
+  # OTLP receiver: accept telemetry from applications on this host
+  # ---------------------------------------------------------------------------
+  # Applications should set OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
+  # or http://localhost:4318 to send telemetry to this local collector.
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+  # ---------------------------------------------------------------------------
+  # Host metrics: comprehensive system-level metrics
+  # ---------------------------------------------------------------------------
+  # On bare metal, host metrics are the primary infrastructure signal (no
+  # kubelet or container runtime metrics available). The process scraper
+  # provides per-process metrics for critical application processes.
+  hostmetrics:
+    collection_interval: 30s
+    scrapers:
+      cpu:        # system.cpu.time, system.cpu.utilization per-core
+      memory:     # system.memory.usage (used, free, buffered, cached)
+      disk:       # system.disk.io — critical for detecting I/O bottlenecks
+      filesystem: # system.filesystem.usage — alerts before disks fill up
+      network:    # system.network.io — traffic and error counters per interface
+      load:       # system.cpu.load_average — classic Unix load metric
+      paging:     # system.paging.usage — swap usage indicates memory pressure
+      process:
+        # Only collect per-process metrics for known application processes.
+        # Collecting metrics for ALL processes is expensive and noisy.
+        # Add process names that are critical to monitor on this host.
+        include:
+          match_type: regexp
+          names:
+            - "myapp.*"
+            - "nginx"
+            - "postgres"
+            - "redis-server"
+
+  # ---------------------------------------------------------------------------
+  # Filelog: application logs (JSON format)
+  # ---------------------------------------------------------------------------
+  # Expects structured JSON logs from the application. Most modern logging
+  # libraries (logback, slog, zerolog, etc.) support JSON output.
+  filelog/app:
+    include:
+      - /var/log/myapp/*.log
+    start_at: end
+    operators:
+      # Parse JSON-formatted application logs.
+      # Expects: {"timestamp":"...","level":"...","message":"...","key":"value"}
+      - type: json_parser
+        id: json_parser
+        timestamp:
+          parse_from: attributes.timestamp
+          layout: '%Y-%m-%dT%H:%M:%S.%LZ'
+      # Map the parsed severity/level field to the OTel log severity.
+      - type: severity_parser
+        id: severity_parser
+        parse_from: attributes.level
+        mapping:
+          trace: trace
+          debug: debug
+          info: info
+          warn: warn
+          error: error
+          fatal: fatal
+
+  # ---------------------------------------------------------------------------
+  # Filelog: system logs (syslog format)
+  # ---------------------------------------------------------------------------
+  # Covers both Debian-style (/var/log/syslog) and RHEL-style (/var/log/messages).
+  # Only one will typically exist per host; the other is silently ignored.
+  filelog/syslog:
+    include:
+      - /var/log/syslog
+      - /var/log/messages
+    start_at: end
+    operators:
+      # Parse traditional syslog format:
+      # "Jan  2 15:04:05 hostname process[pid]: message"
+      - type: regex_parser
+        id: syslog_parser
+        regex: '^(?P<timestamp>[A-Z][a-z]{2}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2})\s+(?P<hostname>\S+)\s+(?P<process>[^\[:]+)(?:\[(?P<pid>\d+)\])?:\s+(?P<message>.*)'
+        timestamp:
+          parse_from: attributes.timestamp
+          layout: '%b %e %H:%M:%S'
+        severity:
+          # Default syslog entries to INFO; the format doesn't carry severity.
+          preset: none
+
+processors:
+  # ===========================================================================
+  # PROCESSOR ORDERING WARNING:
+  # memory_limiter MUST be first. resourcedetection should run early to stamp
+  # host identity before any enrichment. resource adds custom attributes.
+  # batch MUST be last.
+  # ===========================================================================
+
+  # ---------------------------------------------------------------------------
+  # Memory limiter: backpressure valve to prevent the agent from being OOM-killed
+  # ---------------------------------------------------------------------------
+  # Formula: limit_mib = MemoryMax(512Mi) * 0.80 = 409
+  #          spike_limit_mib = MemoryMax(512Mi) * 0.20 = 102
+  # The systemd MemoryMax=512M acts as the hard ceiling. The memory_limiter
+  # triggers backpressure before systemd kills the process.
+  memory_limiter:
+    limit_mib: 409
+    spike_limit_mib: 102
+    check_interval: 1s
+
+  # ---------------------------------------------------------------------------
+  # Resource detection: automatically discover host identity and cloud metadata
+  # ---------------------------------------------------------------------------
+  # On EC2: adds cloud.provider, cloud.platform, cloud.region, cloud.account.id,
+  #   cloud.availability_zone, host.id, host.type, host.image.id, host.name
+  # On bare metal (system detector): adds host.name, os.type, host.arch,
+  #   host.id (machine-id)
+  # override: false preserves any values already set by the application SDK.
+  # timeout: 5s prevents slow IMDS responses from blocking startup.
+  resourcedetection:
+    detectors: [ec2, system]
+    timeout: 5s
+    override: false
+
+  # ---------------------------------------------------------------------------
+  # Resource: add organizational and environment attributes
+  # ---------------------------------------------------------------------------
+  # These attributes enable filtering by environment and team ownership in
+  # the observability backend. Using env vars allows the same binary/config
+  # across all hosts with per-host environment files.
+  resource:
+    attributes:
+      - key: deployment.environment
+        value: ${env:OTEL_ENVIRONMENT}
+        action: upsert
+      - key: service.team
+        value: ${env:OTEL_SERVICE_TEAM}
+        action: upsert
+
+  # ---------------------------------------------------------------------------
+  # Batch: group telemetry for efficient export
+  # ---------------------------------------------------------------------------
+  # Same sizing as the Kubernetes agent: small batches, short timeout.
+  # On bare metal, the gateway may be remote (cross-DC or cross-region),
+  # so timely delivery matters for alerting latency.
+  batch:
+    send_batch_size: 1024
+    send_batch_max_size: 2048
+    timeout: 1s
+
+exporters:
+  # ---------------------------------------------------------------------------
+  # OTLP exporter: send telemetry to the remote gateway
+  # ---------------------------------------------------------------------------
+  # Unlike Kubernetes agents, bare metal agents export over the network
+  # (potentially over the internet), so TLS is required.
+  otlp/gateway:
+    endpoint: ${env:OTEL_GATEWAY_ENDPOINT}
+    tls:
+      # TLS enabled — traffic leaves the host network.
+      # Set to true only if the gateway terminates TLS at a load balancer
+      # and you're on a trusted internal network.
+      insecure: false
+    compression: zstd
+    sending_queue:
+      enabled: true
+      queue_size: 256
+      # Persistent queue backed by local disk via the file_storage extension.
+      # This survives collector restarts — critical for bare metal where
+      # network outages to the gateway can last minutes. Without this,
+      # in-memory queued data is lost on restart.
+      storage: file_storage
+    retry_on_failure:
+      enabled: true
+      initial_interval: 5s
+      max_interval: 30s
+      # 5 minutes max retry — bare metal agents may face longer network
+      # interruptions than in-cluster agents. The persistent queue provides
+      # additional durability beyond this retry window.
+      max_elapsed_time: 300s
+
+extensions:
+  # Health check for external monitoring (e.g., Consul health checks,
+  # load balancer probes, or a simple curl-based systemd watchdog).
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+  # File storage for persistent sending queues.
+  # Data is stored as protobuf files in this directory. Ensure the directory
+  # exists and is writable by the otelcol user.
+  # Size on disk depends on queue_size and batch sizes — typically <100MB.
+  file_storage:
+    directory: /var/lib/otelcol/storage
+
+service:
+  extensions: [health_check, file_storage]
+
+  pipelines:
+    traces:
+      receivers: [otlp]
+      # Order: memory_limiter -> resourcedetection -> resource -> batch
+      processors: [memory_limiter, resourcedetection, resource, batch]
+      exporters: [otlp/gateway]
+
+    metrics:
+      receivers: [otlp, hostmetrics]
+      processors: [memory_limiter, resourcedetection, resource, batch]
+      exporters: [otlp/gateway]
+
+    logs:
+      receivers: [otlp, filelog/app, filelog/syslog]
+      processors: [memory_limiter, resourcedetection, resource, batch]
+      exporters: [otlp/gateway]
+
+  telemetry:
+    metrics:
+      # Collector self-metrics. On bare metal, you may scrape this with a
+      # local Prometheus agent or the hostmetrics receiver won't cover it.
+      address: 0.0.0.0:8888

@@ -1,0 +1,190 @@
+# =============================================================================
+# OTel Collector Gateway — Kubernetes Deployment Configuration
+# =============================================================================
+#
+# Referenced from: Chapter 03 — Agent+Gateway Topology
+#
+# Purpose:
+#   This config runs as a horizontally-scaled Deployment (typically 3+ replicas
+#   behind a Service). It receives telemetry from DaemonSet agents, normalizes
+#   and filters it, then exports to the observability backend (Honeycomb).
+#
+# Prerequisites:
+#   - OTel Collector deployed as a Deployment (2-5 replicas recommended)
+#   - Container resource limits: 2Gi memory, 1 CPU
+#   - Kubernetes Service exposing ports 4317 (gRPC) and 4318 (HTTP)
+#   - Environment variable: HONEYCOMB_API_KEY (from a Kubernetes Secret)
+#   - DaemonSet agents configured to send to this gateway's Service address
+#
+# Required Collector distribution: contrib (for transform, filter processors)
+# =============================================================================
+
+receivers:
+  # ---------------------------------------------------------------------------
+  # OTLP receiver: accept telemetry from DaemonSet agents
+  # ---------------------------------------------------------------------------
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+        # Allow larger messages from agents that batch aggressively.
+        # Default is 4MiB which can be too small when agents send large batches
+        # of enriched spans with many attributes.
+        max_recv_msg_size_mib: 16
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  # ===========================================================================
+  # PROCESSOR ORDERING WARNING:
+  # Processors execute in the order listed in each pipeline definition.
+  # memory_limiter MUST be first. Transform and filter run before batch so
+  # that we normalize and discard data before paying the cost of batching it.
+  # batch MUST be last for efficient network utilization to the backend.
+  # ===========================================================================
+
+  # ---------------------------------------------------------------------------
+  # Memory limiter: backpressure valve to prevent OOM kills
+  # ---------------------------------------------------------------------------
+  # Formula: limit_mib = container_limit(2Gi=2048) * 0.80 = 1638
+  #          spike_limit_mib = container_limit(2Gi=2048) * 0.20 = 409
+  # Gateway processes higher throughput than agents, so the 2Gi container
+  # provides headroom for in-flight batches across multiple pipelines.
+  memory_limiter:
+    limit_mib: 1638
+    spike_limit_mib: 409
+    check_interval: 1s
+
+  # ---------------------------------------------------------------------------
+  # Transform: normalize attributes for semantic convention migration
+  # ---------------------------------------------------------------------------
+  # OpenTelemetry semantic conventions evolve over time. This processor bridges
+  # old attribute names to new ones so downstream queries work consistently
+  # regardless of which SDK version instrumented the service.
+  # See: https://opentelemetry.io/docs/specs/semconv/http/migration/
+  transform/normalize:
+    trace_statements:
+      - context: span
+        statements:
+          # Migrate HTTP status code from old to new semconv.
+          # Old: http.status_code (pre-1.20.0)
+          # New: http.response.status_code (1.20.0+)
+          - set(attributes["http.response.status_code"], attributes["http.status_code"])
+            where attributes["http.status_code"] != nil and attributes["http.response.status_code"] == nil
+
+          # Truncate excessively long attribute values to prevent storage bloat.
+          # 10,000 chars is generous enough for stack traces but caps runaway
+          # values like serialized request bodies or SQL queries.
+          - truncate_all(attributes, 10000)
+
+  # ---------------------------------------------------------------------------
+  # Filter: drop noisy, low-value telemetry at the gateway level
+  # ---------------------------------------------------------------------------
+  # Health check endpoints generate massive span volume with zero diagnostic
+  # value. Dropping them here (rather than at the agent) keeps agent config
+  # simple and ensures consistency across all agents.
+  filter/noise:
+    error_mode: ignore
+    traces:
+      span:
+        # Drop Kubernetes health/readiness/liveness probe spans.
+        # These fire every 10-30s per pod and dominate trace volume.
+        - 'IsMatch(attributes["url.path"], "^/(healthz|readyz|livez)$")'
+        # Also match the old semconv attribute name for broad coverage.
+        - 'IsMatch(attributes["http.target"], "^/(healthz|readyz|livez)$")'
+    logs:
+      log_record:
+        # Drop log lines from Kubernetes probes (kube-probe user agent).
+        # These appear as access log entries in web servers.
+        - 'IsMatch(body, "kube-probe")'
+
+  # ---------------------------------------------------------------------------
+  # Batch: group telemetry for efficient export to Honeycomb
+  # ---------------------------------------------------------------------------
+  # Gateway uses larger batches and longer timeouts than agents because:
+  # 1. It aggregates traffic from many agents — higher throughput.
+  # 2. Export goes over the internet to Honeycomb — larger payloads amortize
+  #    TLS handshake and HTTP overhead.
+  # 3. 2s timeout is still well within acceptable latency for observability.
+  batch:
+    send_batch_size: 4096
+    send_batch_max_size: 8192
+    timeout: 2s
+
+exporters:
+  # ---------------------------------------------------------------------------
+  # OTLP exporter: send telemetry to Honeycomb
+  # ---------------------------------------------------------------------------
+  # Honeycomb accepts native OTLP over gRPC. The API key is passed as a
+  # gRPC metadata header per Honeycomb's documentation.
+  otlp/honeycomb:
+    endpoint: api.honeycomb.io:443
+    headers:
+      # API key from Kubernetes Secret — never hardcode credentials.
+      x-honeycomb-team: ${env:HONEYCOMB_API_KEY}
+    # zstd compression reduces egress bandwidth costs significantly.
+    # Honeycomb supports gzip and zstd; zstd is preferred for better ratio
+    # at lower CPU cost.
+    compression: zstd
+    sending_queue:
+      enabled: true
+      # 5000 batches in queue — at 4096 items/batch this buffers ~20M items.
+      # Sized for 5+ minutes of backend downtime at typical throughput.
+      queue_size: 5000
+      # 10 parallel consumers to maximize throughput to Honeycomb.
+      # More consumers = more concurrent HTTP/2 streams.
+      num_consumers: 10
+    retry_on_failure:
+      enabled: true
+      initial_interval: 5s
+      max_interval: 30s
+      # 5 minutes max retry — longer than agent because gateway is the last
+      # hop and dropping data here means permanent data loss.
+      max_elapsed_time: 300s
+
+extensions:
+  # Health check for Kubernetes probes.
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+  # zPages for debugging pipeline issues without external tools.
+  zpages:
+    endpoint: localhost:55679
+
+  # pprof endpoint for CPU/memory profiling during performance investigations.
+  # Only bound to localhost — never expose to the network.
+  pprof:
+    endpoint: localhost:1777
+
+service:
+  extensions: [health_check, zpages, pprof]
+
+  pipelines:
+    traces:
+      receivers: [otlp]
+      # Full pipeline: limit -> normalize -> filter noise -> batch
+      processors: [memory_limiter, transform/normalize, filter/noise, batch]
+      exporters: [otlp/honeycomb]
+
+    metrics:
+      receivers: [otlp]
+      # Metrics skip transform/normalize and filter/noise because:
+      # - Metric attribute names are already stable in most SDKs.
+      # - Health check metrics are low-volume and sometimes useful.
+      processors: [memory_limiter, batch]
+      exporters: [otlp/honeycomb]
+
+    logs:
+      receivers: [otlp]
+      # Logs skip transform but use filter to drop probe noise.
+      processors: [memory_limiter, filter/noise, batch]
+      exporters: [otlp/honeycomb]
+
+  telemetry:
+    metrics:
+      # Collector self-metrics for monitoring the gateway itself.
+      address: 0.0.0.0:8888
+    logs:
+      # Info level is appropriate for production gateways.
+      # Use debug only for troubleshooting — it is extremely verbose.
+      level: info
